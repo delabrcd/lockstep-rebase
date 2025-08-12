@@ -49,23 +49,22 @@ Lockstep Rebase is a powerful Python tool designed to handle the complex task of
 
 ## Installation
 
-### System-wide Installation
+### From Source
 
 ```bash
-# Install from source
+# Clone the repository
 git clone https://github.com/delabrcd/lockstep-rebase.git
 cd lockstep-rebase
-pip install .
 
-# Or install in development mode
+# Install in development mode
 pip install -e .
 ```
 
-### Local Installation
+### Direct Installation from GitHub
 
 ```bash
-# Install in user directory
-pip install --user .
+# Install directly from GitHub
+pip install git+https://github.com/delabrcd/lockstep-rebase.git
 ```
 
 ## Usage

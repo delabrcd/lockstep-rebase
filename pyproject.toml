@@ -27,23 +27,19 @@ Documentation = "https://github.com/delabrcd/lockstep-rebase#readme"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "Topic :: Software Development :: Version Control :: Git",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Version Control :: Git",
 ]
-
-[project.scripts]
-lockstep-rebase = "lockstep_rebase.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/delabrcd/lockstep-rebase"
 "Bug Reports" = "https://github.com/delabrcd/lockstep-rebase/issues"
 "Source" = "https://github.com/delabrcd/lockstep-rebase"
+
+[project.scripts]
+lockstep-rebase = "lockstep_rebase.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
