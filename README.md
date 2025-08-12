@@ -1,6 +1,6 @@
 # Lockstep Rebase
 
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://python.org)
+[![Python Version](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![GitHub](https://img.shields.io/badge/GitHub-delabrcd%2Flockstep--rebase-blue.svg)](https://github.com/delabrcd/lockstep-rebase)
 

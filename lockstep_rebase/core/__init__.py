@@ -13,7 +13,7 @@ from .planner import RebasePlanner, RebasePlan, CommitPlan
 __all__ = [
     "NestedRebaseManager",
     "RepoInfo",
-    "RebaseResult", 
+    "RebaseResult",
     "RebaseState",
     "GitUtils",
     "RebasePlanner",

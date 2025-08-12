@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Python Version Requirement**: Dropped Python 3.8 support, now requires Python 3.9+
+  - Updated to use modern type hint syntax (e.g., `tuple[int, int, int]`)
+  - Improved compatibility with latest packaging tools
+  - Updated CI/CD pipeline to test Python 3.9-3.12
+
 ## [1.1.1] - 2025-01-12
 
 ### Added
