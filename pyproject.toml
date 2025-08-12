@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lockstep-rebase"
+dynamic = ["version"]
+description = "Automated nested Git submodule rebasing tool with intelligent conflict resolution"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Caleb DeLaBruere", email = "caleb.delabruere@inficon.com"},
+]
+maintainers = [
+    {name = "Caleb DeLaBruere", email = "caleb.delabruere@inficon.com"},
+]
+keywords = ["git", "rebase", "submodule", "automation", "lockstep", "cli", "fuzzy-search", "bash-style"]
+
+[project.urls]
+Homepage = "https://github.com/delabrcd/lockstep-rebase"
+Repository = "https://github.com/delabrcd/lockstep-rebase.git"
+"Bug Tracker" = "https://github.com/delabrcd/lockstep-rebase/issues"
+Changelog = "https://github.com/delabrcd/lockstep-rebase/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/delabrcd/lockstep-rebase#readme"
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Version Control :: Git",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent",
+]
+
+[project.scripts]
+lockstep-rebase = "lockstep_rebase.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/delabrcd/lockstep-rebase"
+"Bug Reports" = "https://github.com/delabrcd/lockstep-rebase/issues"
+"Source" = "https://github.com/delabrcd/lockstep-rebase"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lockstep_rebase*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 100
