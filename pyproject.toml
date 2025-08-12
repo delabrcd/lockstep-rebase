@@ -16,14 +16,6 @@ maintainers = [
     {name = "Caleb DeLaBruere", email = "caleb.delabruere@inficon.com"},
 ]
 keywords = ["git", "rebase", "submodule", "automation", "lockstep", "cli", "fuzzy-search", "bash-style"]
-
-[project.urls]
-Homepage = "https://github.com/delabrcd/lockstep-rebase"
-Repository = "https://github.com/delabrcd/lockstep-rebase.git"
-"Bug Tracker" = "https://github.com/delabrcd/lockstep-rebase/issues"
-Changelog = "https://github.com/delabrcd/lockstep-rebase/blob/main/CHANGELOG.md"
-Documentation = "https://github.com/delabrcd/lockstep-rebase#readme"
-
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -35,8 +27,11 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/delabrcd/lockstep-rebase"
-"Bug Reports" = "https://github.com/delabrcd/lockstep-rebase/issues"
+Repository = "https://github.com/delabrcd/lockstep-rebase.git"
+"Bug Tracker" = "https://github.com/delabrcd/lockstep-rebase/issues"
 "Source" = "https://github.com/delabrcd/lockstep-rebase"
+Changelog = "https://github.com/delabrcd/lockstep-rebase/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/delabrcd/lockstep-rebase#readme"
 
 [project.scripts]
 lockstep-rebase = "lockstep_rebase.cli:main"
@@ -44,6 +39,9 @@ lockstep-rebase = "lockstep_rebase.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["lockstep_rebase*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "lockstep_rebase._version.VERSION"}
 
 [tool.black]
 line-length = 100
