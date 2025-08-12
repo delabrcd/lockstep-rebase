@@ -6,7 +6,6 @@ cannot be automatically resolved.
 """
 
 import subprocess
-import time
 from typing import List
 
 from ..core.models import RepoInfo

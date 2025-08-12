@@ -8,7 +8,7 @@ resuming interrupted operations.
 import json
 import os
 import time
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 
 from ..core.models import RebaseState
 

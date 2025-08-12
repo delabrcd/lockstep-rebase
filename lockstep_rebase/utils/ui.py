@@ -5,18 +5,15 @@ This module provides enhanced UI components including fuzzy search
 and autocomplete functionality for better user experience.
 """
 
-import re
 import sys
-import os
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 # Try to import advanced terminal control libraries
 try:
     import msvcrt  # Windows
     WINDOWS = True
 except ImportError:
-    import termios
-    import tty
+    msvcrt = None  # type: ignore
     WINDOWS = False
 
 
@@ -132,7 +129,7 @@ class InlineAutocomplete:
         print("Type to search, Tab for best match, Enter to confirm, Ctrl+C to cancel:")
 
         current_input = ""
-        cursor_pos = 0
+        # cursor_pos = 0  # Not used in current implementation
 
         while True:
             # Show current state
@@ -156,7 +153,7 @@ class InlineAutocomplete:
 
             # Get next character
             try:
-                if msvcrt.kbhit():
+                if WINDOWS and msvcrt and msvcrt.kbhit():
                     char = msvcrt.getch()
 
                     if char == b'\r':  # Enter

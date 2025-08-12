@@ -8,8 +8,7 @@ the entire lockstep rebase process.
 import os
 import subprocess
 import sys
-import time
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 
 from .models import RepoInfo, RebaseResult, RebaseState
 from .git_utils import GitUtils
@@ -755,8 +754,7 @@ class NestedRebaseManager:
 
             try:
                 if not self.dry_run:
-                    # leaving this out for testing
-                    # self.git_utils.sh(['git', 'push', '--force-with-lease', 'origin', branch], cwd=result.repo_path)
+                    self.git_utils.sh(['git', 'push', '--force-with-lease', 'origin', branch], cwd=result.repo_path)
                     print(f"✅ Successfully pushed {repo_name}")
                 else:
                     print(f"[DRY RUN] Would push {branch} to origin")

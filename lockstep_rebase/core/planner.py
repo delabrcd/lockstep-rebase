@@ -8,7 +8,7 @@ mappings during rebase operations, enabling deterministic conflict resolution.
 import os
 import subprocess
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set
 
 from .models import RepoInfo, RebaseResult
 from .git_utils import GitUtils
