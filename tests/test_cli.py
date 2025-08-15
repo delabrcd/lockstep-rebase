@@ -7,8 +7,8 @@ from unittest.mock import Mock, patch, MagicMock
 from click.testing import CliRunner
 from pathlib import Path
 
-from windsurf_project.cli import cli
-from windsurf_project.models import RebaseError
+from lockstep_rebase.cli import cli
+from lockstep_rebase.models import RebaseError
 
 
 class TestCLI:
@@ -29,7 +29,7 @@ class TestCLI:
         result = self.runner.invoke(cli, ['--verbose', '--help'])
         assert result.exit_code == 0
     
-    @patch('windsurf_project.cli.RebaseOrchestrator')
+    @patch('lockstep_rebase.cli.RebaseOrchestrator')
     def test_status_command(self, mock_orchestrator_class):
         """Test status command."""
         # Mock orchestrator
@@ -49,7 +49,7 @@ class TestCLI:
         assert result.exit_code == 0
         assert 'Repository Status' in result.output
     
-    @patch('windsurf_project.cli.RebaseOrchestrator')
+    @patch('lockstep_rebase.cli.RebaseOrchestrator')
     def test_hierarchy_command(self, mock_orchestrator_class):
         """Test hierarchy command."""
         mock_orchestrator = Mock()
@@ -59,7 +59,7 @@ class TestCLI:
         assert result.exit_code == 0
         mock_orchestrator.print_repository_hierarchy.assert_called_once()
     
-    @patch('windsurf_project.cli.RebaseOrchestrator')
+    @patch('lockstep_rebase.cli.RebaseOrchestrator')
     def test_validate_command_success(self, mock_orchestrator_class):
         """Test validate command with successful validation."""
         mock_orchestrator = Mock()
@@ -72,7 +72,7 @@ class TestCLI:
         assert result.exit_code == 0
         assert 'All validations passed' in result.output
     
-    @patch('windsurf_project.cli.RebaseOrchestrator')
+    @patch('lockstep_rebase.cli.RebaseOrchestrator')
     def test_validate_command_failure(self, mock_orchestrator_class):
         """Test validate command with validation failures."""
         mock_orchestrator = Mock()
@@ -84,7 +84,7 @@ class TestCLI:
         assert result.exit_code == 1
         assert 'Repository State Issues' in result.output
     
-    @patch('windsurf_project.cli.RebaseOrchestrator')
+    @patch('lockstep_rebase.cli.RebaseOrchestrator')
     def test_rebase_dry_run(self, mock_orchestrator_class):
         """Test rebase command with dry run."""
         mock_orchestrator = Mock()
@@ -99,7 +99,7 @@ class TestCLI:
         assert 'Dry Run Complete' in result.output
         mock_orchestrator.execute_rebase.assert_not_called()
     
-    @patch('windsurf_project.cli.RebaseOrchestrator')
+    @patch('lockstep_rebase.cli.RebaseOrchestrator')
     @patch('click.confirm')
     def test_rebase_command_success(self, mock_confirm, mock_orchestrator_class):
         """Test successful rebase command."""
@@ -118,7 +118,7 @@ class TestCLI:
         assert result.exit_code == 0
         assert 'Rebase completed successfully' in result.output
     
-    @patch('windsurf_project.cli.RebaseOrchestrator')
+    @patch('lockstep_rebase.cli.RebaseOrchestrator')
     @patch('click.confirm')
     def test_rebase_command_cancelled(self, mock_confirm, mock_orchestrator_class):
         """Test cancelled rebase command."""
@@ -136,7 +136,7 @@ class TestCLI:
         assert 'Operation cancelled' in result.output
         mock_orchestrator.execute_rebase.assert_not_called()
     
-    @patch('windsurf_project.cli.RebaseOrchestrator')
+    @patch('lockstep_rebase.cli.RebaseOrchestrator')
     def test_rebase_command_with_validation_errors_force(self, mock_orchestrator_class):
         """Test rebase command with validation errors and force flag."""
         mock_orchestrator = Mock()
@@ -150,7 +150,7 @@ class TestCLI:
         assert result.exit_code == 0
         assert 'Validation Warnings' in result.output
     
-    @patch('windsurf_project.cli.RebaseOrchestrator')
+    @patch('lockstep_rebase.cli.RebaseOrchestrator')
     def test_rebase_command_error_handling(self, mock_orchestrator_class):
         """Test rebase command error handling."""
         mock_orchestrator_class.side_effect = RebaseError("Test error")

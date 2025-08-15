@@ -4,7 +4,7 @@ Tests for data models.
 
 import pytest
 from pathlib import Path
-from windsurf_project.models import (
+from lockstep_rebase.models import (
     CommitInfo, RepoInfo, RebaseState, RebaseOperation,
     RebaseError, GitRepositoryError, SubmoduleError, ConflictResolutionError
 )
