@@ -3,8 +3,8 @@ Tests for commit tracking functionality.
 """
 
 import pytest
-from windsurf_project.commit_tracker import CommitTracker, GlobalCommitTracker
-from windsurf_project.models import CommitInfo
+from lockstep_rebase.commit_tracker import CommitTracker, GlobalCommitTracker
+from lockstep_rebase.models import CommitInfo
 
 
 class TestCommitTracker:

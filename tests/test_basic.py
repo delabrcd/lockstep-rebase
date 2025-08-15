@@ -3,8 +3,8 @@ Basic tests for the Git submodule rebase tool.
 """
 
 import pytest
-from windsurf_project import __version__
-from windsurf_project import (
+from lockstep_rebase import __version__
+from lockstep_rebase import (
     RebaseOrchestrator, RebaseOperation, RebaseState, RepoInfo, CommitInfo,
     GitManager, SubmoduleMapper, CommitTracker, GlobalCommitTracker, ConflictResolver
 )
@@ -17,8 +17,8 @@ def test_version():
 
 def test_import():
     """Test that the package can be imported."""
-    import windsurf_project
-    assert windsurf_project is not None
+    import lockstep_rebase
+    assert lockstep_rebase is not None
 
 
 def test_all_imports():
@@ -38,7 +38,7 @@ def test_all_imports():
 
 def test_package_structure():
     """Test package structure and __all__ exports."""
-    import windsurf_project
+    import lockstep_rebase
     
     # Check that __all__ contains expected exports
     expected_exports = [
@@ -55,4 +55,4 @@ def test_package_structure():
     ]
     
     for export in expected_exports:
-        assert hasattr(windsurf_project, export), f"Missing export: {export}"
+        assert hasattr(lockstep_rebase, export), f"Missing export: {export}"
