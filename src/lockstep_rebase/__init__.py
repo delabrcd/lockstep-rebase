@@ -16,12 +16,12 @@ from .conflict_resolver import ConflictResolver
 
 __all__ = [
     "RebaseOrchestrator",
-    "RebaseOperation", 
+    "RebaseOperation",
     "RebaseState",
     "RepoInfo",
     "CommitInfo",
     "GitManager",
-    "SubmoduleMapper", 
+    "SubmoduleMapper",
     "CommitTracker",
     "GlobalCommitTracker",
     "ConflictResolver",
