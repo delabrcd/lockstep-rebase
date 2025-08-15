@@ -6,15 +6,17 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from datetime import datetime
 from typing import Dict, List, Optional
 
-from .models import RebaseOperation, RebaseState, RepoInfo, RebaseError, HierarchyEntry
+from .models import RebaseOperation, RebaseState, RepoInfo, RebaseError, HierarchyEntry, BackupEntry
 from .git_manager import GitManager
 from .submodule_mapper import SubmoduleMapper
 from .commit_tracker import GlobalCommitTracker
 from .conflict_resolver import ConflictResolver
 from .prompt_interface import UserPrompt, NoOpPrompt
 from .conflict_prompt_interface import ConflictPrompt
+from .backup_manager import BackupManager, BACKUP_PREFIX
 
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,7 @@ class RebaseOrchestrator:
         self.submodule_mapper = SubmoduleMapper(self.root_path)
         self.global_tracker = GlobalCommitTracker()
         self.conflict_resolver = ConflictResolver(self.global_tracker, conflict_prompt)
+        self.backup_manager = BackupManager()
 
         # Discover repository hierarchy
         self.root_repo_info = self.submodule_mapper.discover_repository_hierarchy()
@@ -110,6 +113,10 @@ class RebaseOrchestrator:
         logger.info("Starting rebase execution")
 
         try:
+            # Ensure backups exist before any mutations if not already prepared
+            if not operation.backup_session_id:
+                self.create_backups(operation)
+
             for state in operation.repo_states:
                 if not self._execute_repository_rebase(state, operation):
                     logger.error(f"Rebase failed for {state.repo.name}")
@@ -122,6 +129,133 @@ class RebaseOrchestrator:
             logger.error(f"Rebase execution failed: {e}")
             self._cleanup_failed_rebase(operation)
             raise RebaseError(f"Rebase execution failed: {e}")
+
+    def create_backups(self, operation: RebaseOperation) -> None:
+        """Create backup branches for all repositories' source branches.
+
+        This should be called after planning and before execution. Idempotent if called twice in the same session.
+        """
+        # Initialize session id if not present
+        if not operation.backup_session_id:
+            operation.backup_session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+        created = 0
+        for state in operation.repo_states:
+            repo_path = state.repo.path
+            key = str(repo_path)
+            if key in operation.backup_branches:
+                continue
+            try:
+                backup_name = self.backup_manager.create_backup_branch(
+                    repo_path, state.source_branch, session_id=operation.backup_session_id
+                )
+                operation.backup_branches[key] = backup_name
+                created += 1
+            except Exception as e:
+                logger.error(
+                    f"Failed to create backup for {state.repo.name} ({state.source_branch}): {e}"
+                )
+                raise RebaseError(
+                    f"Failed to create backup branch in {state.repo.name}: {e}"
+                )
+        logger.info(f"Created {created} backup branches for session {operation.backup_session_id}")
+
+    def delete_backups(self, operation: RebaseOperation) -> int:
+        """Delete all backup branches recorded for this operation.
+
+        Returns number of deleted backups.
+        """
+        deleted = 0
+        for path_str, backup_name in list(operation.backup_branches.items()):
+            try:
+                self.backup_manager.delete_backup_branch(Path(path_str), backup_name)
+                deleted += 1
+                del operation.backup_branches[path_str]
+            except Exception as e:
+                logger.error(f"Failed to delete backup {backup_name} in {path_str}: {e}")
+        return deleted
+
+    def list_backups_in_repo(self, repo_path: Optional[Path] = None) -> List[str]:
+        """List backup branches in the specified or root repository."""
+        target = repo_path or self.root_path
+        return self.backup_manager.list_backup_branches(target)
+
+    def list_parsed_backups_in_repo(
+        self, repo_path: Optional[Path] = None, original_branch: Optional[str] = None
+    ) -> List[BackupEntry]:
+        """List structured backup entries in the specified or root repository."""
+        target = repo_path or self.root_path
+        return self.backup_manager.list_parsed_backups(target, original_branch=original_branch)
+
+    def list_backups_across_hierarchy(self, original_branch: Optional[str] = None) -> List[BackupEntry]:
+        """Aggregate structured backup entries across the repository hierarchy."""
+        entries: List[BackupEntry] = []
+        for repo_info in self._get_all_repositories(self.root_repo_info):
+            try:
+                entries.extend(
+                    self.backup_manager.list_parsed_backups(
+                        repo_info.path, original_branch=original_branch
+                    )
+                )
+            except Exception:
+                # Ignore repos that error on listing
+                continue
+        return entries
+
+    def delete_backup_in_repo(self, backup_branch: str, repo_path: Optional[Path] = None) -> bool:
+        """Delete a specific backup branch in the given repository."""
+        target = repo_path or self.root_path
+        try:
+            self.backup_manager.delete_backup_branch(target, backup_branch)
+            return True
+        except Exception:
+            return False
+
+    def restore_original_branch_in_repo(
+        self,
+        original_branch: str,
+        repo_path: Optional[Path] = None,
+        session_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Restore original branch from a backup in the given repo.
+
+        If session_id is provided, uses that exact backup name. Otherwise picks the latest backup.
+
+        Returns the backup branch name used on success, or None if no suitable backup found.
+        """
+        target = repo_path or self.root_path
+        backup_name: Optional[str] = None
+        if session_id:
+            candidate = f"{BACKUP_PREFIX}/{original_branch}/{session_id}"
+            backups = self.backup_manager.list_backup_branches(target)
+            if candidate in backups:
+                backup_name = candidate
+        else:
+            backup_name = self.backup_manager.get_latest_backup_for_original_branch(
+                target, original_branch
+            )
+
+        if not backup_name:
+            return None
+
+        self.backup_manager.restore_branch_from_backup(target, original_branch, backup_name)
+        return backup_name
+
+    def restore_original_branches_across_hierarchy(
+        self, original_branch: str, session_id: Optional[str] = None
+    ) -> int:
+        """Restore the original branch from backups across all repositories in the hierarchy.
+
+        Returns number of repositories restored.
+        """
+        restored = 0
+        for repo_info in self._get_all_repositories(self.root_repo_info):
+            used = self.restore_original_branch_in_repo(
+                original_branch, repo_info.path, session_id=session_id
+            )
+            if used:
+                restored += 1
+        return restored
 
     def _execute_repository_rebase(self, state: RebaseState, operation: RebaseOperation) -> bool:
         """Execute rebase for a single repository."""

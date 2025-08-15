@@ -74,15 +74,18 @@ class GitManager:
             return False
 
     def branch_exists(self, branch_name: str, repo_path: Optional[Path] = None) -> bool:
-        """Check if a branch exists in the repository."""
+        """Check if a local branch exists (supports full names with slashes)."""
         try:
             if repo_path and repo_path != Path(self.repo.working_dir):
                 temp_repo = Repo(repo_path)
-                branches = [ref.name.split("/")[-1] for ref in temp_repo.refs]
             else:
-                branches = [ref.name.split("/")[-1] for ref in self.repo.refs]
+                temp_repo = self.repo
 
-            return branch_name in branches
+            # Local heads only
+            head_names = [h.name for h in temp_repo.heads]
+            # Backward-compatible check against last component
+            short_names = [n.split("/")[-1] for n in head_names]
+            return branch_name in head_names or branch_name in short_names
         except Exception as e:
             logger.error(f"Error checking branch existence: {e}")
             return False
@@ -112,6 +115,58 @@ class GitManager:
         except Exception as e:
             logger.error(f"Error checking out branch {branch_name}: {e}")
             raise GitRepositoryError(f"Failed to checkout branch {branch_name}: {e}")
+
+    def list_local_branches(self, repo_path: Optional[Path] = None) -> List[str]:
+        """List local branch names (full names, including slashes)."""
+        try:
+            if repo_path and repo_path != Path(self.repo.working_dir):
+                temp_repo = Repo(repo_path)
+            else:
+                temp_repo = self.repo
+            return [h.name for h in temp_repo.heads]
+        except Exception as e:
+            logger.error(f"Error listing local branches: {e}")
+            return []
+
+    def create_or_update_branch(
+        self, branch_name: str, target: str, repo_path: Optional[Path] = None
+    ) -> None:
+        """Create or force-update a local branch to point at target (commitish)."""
+        try:
+            if repo_path and repo_path != Path(self.repo.working_dir):
+                temp_repo = Repo(repo_path)
+            else:
+                temp_repo = self.repo
+
+            current = None
+            try:
+                current = temp_repo.active_branch.name
+            except Exception:
+                current = None
+
+            if current == branch_name:
+                # When updating the currently checked out branch, use reset --hard
+                temp_repo.git.reset("--hard", target)
+            else:
+                temp_repo.git.branch("-f", branch_name, target)
+
+            logger.info(f"Created/updated branch {branch_name} -> {target}")
+        except Exception as e:
+            logger.error(f"Error creating/updating branch {branch_name}: {e}")
+            raise GitRepositoryError(f"Failed to create/update branch {branch_name}: {e}")
+
+    def delete_branch(self, branch_name: str, repo_path: Optional[Path] = None) -> None:
+        """Delete a local branch (force)."""
+        try:
+            if repo_path and repo_path != Path(self.repo.working_dir):
+                temp_repo = Repo(repo_path)
+                temp_repo.git.branch("-D", branch_name)
+            else:
+                self.repo.git.branch("-D", branch_name)
+            logger.info(f"Deleted branch {branch_name}")
+        except Exception as e:
+            logger.error(f"Error deleting branch {branch_name}: {e}")
+            raise GitRepositoryError(f"Failed to delete branch {branch_name}: {e}")
 
     def get_commits_between(
         self, base_branch: str, feature_branch: str, repo_path: Optional[Path] = None
