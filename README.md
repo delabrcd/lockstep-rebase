@@ -78,6 +78,38 @@ lockstep-rebase hierarchy
 lockstep-rebase --verbose rebase feature/awesome-feature main
 ```
 
+### Selective Rebasing (Include/Exclude)
+```bash
+# Rebase only specific repos by name or relative path (repeat --include)
+lockstep-rebase rebase feature/awesome-feature main \
+  --include shared-lib \
+  --include libs/core
+
+# Exclude specific repos (repeat --exclude)
+lockstep-rebase rebase feature/awesome-feature main \
+  --exclude experimental-lib
+```
+
+### Per-Repo Branch Overrides
+```bash
+# Override source branch for a repo; target inherits global target
+lockstep-rebase rebase feature/top main \
+  --branch-map libs/core=feature/core-top
+
+# Override both source and target for a repo
+lockstep-rebase rebase feature/top main \
+  --branch-map shared-lib=feature/shared-new:release/1.2
+
+# Multiple mappings
+lockstep-rebase rebase feature/top main \
+  --branch-map shared-lib=feature/shared-new:main \
+  --branch-map tools/formatter=feature/fmt:dev
+```
+
+Notes:
+- Identifiers for `--include`, `--exclude`, and `--branch-map` keys can be repo name, relative path from root, or absolute path.
+- `--branch-map` format is `repo=SRC[:TGT]`. If `:TGT` is omitted, the global target branch is used for that repo.
+
 ## How It Works
 
 ### 1. Repository Discovery

@@ -41,7 +41,14 @@ class RebaseOrchestrator:
         logger.info(f"Initialized rebase orchestrator for {self.root_repo_info.name}")
 
     def plan_rebase(
-        self, source_branch: str, target_branch: str, prompt: UserPrompt = None
+        self,
+        source_branch: str,
+        target_branch: str,
+        prompt: UserPrompt = None,
+        *,
+        include: Optional[set[str]] = None,
+        exclude: Optional[set[str]] = None,
+        branch_map: Optional[dict[str, tuple[str, Optional[str]]]] = None,
     ) -> RebaseOperation:
         """
         Plan a rebase operation across all repositories.
@@ -58,47 +65,84 @@ class RebaseOrchestrator:
         if prompt is None:
             prompt = NoOpPrompt()
 
-        # Validate branches exist in all repositories
-        missing_branches = self.submodule_mapper.validate_branches_exist(
-            self.root_repo_info, source_branch, target_branch, prompt
-        )
-
-        if missing_branches["missing_source"]:
-            raise RebaseError(
-                f"Source branch '{source_branch}' missing in: {', '.join(missing_branches['missing_source'])}"
-            )
-
-        if missing_branches["missing_target"]:
-            raise RebaseError(
-                f"Target branch '{target_branch}' missing in: {', '.join(missing_branches['missing_target'])}"
-            )
-
-        # Create rebase operation
+        # Create rebase operation (global defaults)
         operation = RebaseOperation(
             root_repo=self.root_repo_info, source_branch=source_branch, target_branch=target_branch
         )
 
-        # Get repositories in rebase order (deepest first)
-        rebase_order = self.submodule_mapper.get_rebase_order(self.root_repo_info)
+        # Compute repositories in rebase order (deepest first)
+        full_order = self.submodule_mapper.get_rebase_order(self.root_repo_info)
 
-        # Create rebase states for each repository
-        for repo_info in rebase_order:
-            git_manager = GitManager(repo_info.path)
+        # Filter include/exclude
+        def _matches(repo: RepoInfo, token: str) -> bool:
+            rel = str(repo.path.relative_to(self.root_path)) if self.root_path in repo.path.parents or repo.path == self.root_path else str(repo.path)
+            return token == repo.name or token == rel or token == str(repo.path)
 
-            # Get commits that will be rebased
-            original_commits = git_manager.get_commits_between(
-                target_branch, source_branch, repo_info.path
+        if include:
+            selected = [r for r in full_order if any(_matches(r, t) for t in include)]
+            if not selected:
+                raise RebaseError("No repositories matched --include filters")
+        else:
+            selected = list(full_order)
+
+        if exclude:
+            selected = [r for r in selected if not any(_matches(r, t) for t in exclude)]
+            if not selected:
+                raise RebaseError("All repositories were excluded by --exclude filters")
+
+        # Per-repo branch resolve using branch_map overrides
+        def _resolve_branches(repo: RepoInfo) -> tuple[str, str]:
+            if not branch_map:
+                return source_branch, target_branch
+            # Priority: name, relative path, absolute path
+            rel = str(repo.path.relative_to(self.root_path)) if self.root_path in repo.path.parents or repo.path == self.root_path else str(repo.path)
+            keys = [repo.name, rel, str(repo.path)]
+            for k in keys:
+                if k in branch_map:
+                    src, tgt = branch_map[k]
+                    return src or source_branch, (tgt if tgt is not None else target_branch)
+            return source_branch, target_branch
+
+        # Validate branches per repo and build states
+        missing_src: list[str] = []
+        missing_tgt: list[str] = []
+
+        for repo_info in selected:
+            gm = GitManager(repo_info.path)
+            src_br, tgt_br = _resolve_branches(repo_info)
+
+            if not gm.branch_exists(src_br, repo_info.path):
+                missing_src.append(f"{repo_info.name} ({src_br})")
+            if not gm.branch_exists(tgt_br, repo_info.path):
+                missing_tgt.append(f"{repo_info.name} ({tgt_br})")
+
+        if missing_src:
+            raise RebaseError(
+                "Source branch missing in: " + ", ".join(missing_src)
             )
+        if missing_tgt:
+            raise RebaseError(
+                "Target branch missing in: " + ", ".join(missing_tgt)
+            )
+
+        # Build rebase states
+        for repo_info in selected:
+            gm = GitManager(repo_info.path)
+            src_br, tgt_br = _resolve_branches(repo_info)
+
+            original_commits = gm.get_commits_between(tgt_br, src_br, repo_info.path)
 
             state = RebaseState(
                 repo=repo_info,
-                source_branch=source_branch,
-                target_branch=target_branch,
+                source_branch=src_br,
+                target_branch=tgt_br,
                 original_commits=original_commits,
             )
 
             operation.repo_states.append(state)
-            logger.debug(f"Planned rebase for {repo_info.name}: {len(original_commits)} commits")
+            logger.debug(
+                f"Planned rebase for {repo_info.name}: {len(original_commits)} commits ({src_br} -> {tgt_br})"
+            )
 
         logger.info(f"Planned rebase operation for {len(operation.repo_states)} repositories")
         return operation
