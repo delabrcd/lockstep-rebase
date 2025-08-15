@@ -69,6 +69,10 @@ class RebaseOperation:
     target_branch: str
     repo_states: List[RebaseState] = field(default_factory=list)
     global_commit_mapping: Dict[str, str] = field(default_factory=dict)
+    # Backup metadata
+    backup_session_id: Optional[str] = None
+    # Map of repo path (str) -> backup branch name
+    backup_branches: Dict[str, str] = field(default_factory=dict)
 
     def get_state_for_repo(self, repo_path: Path) -> Optional[RebaseState]:
         """Get rebase state for a specific repository."""
@@ -137,3 +141,14 @@ class HierarchyEntry:
     depth: int
     is_submodule: bool
     parent_name: Optional[str] = None
+
+
+@dataclass
+class BackupEntry:
+    """Structured representation of a backup branch in a repository."""
+
+    repo_path: Path
+    repo_name: str
+    backup_branch: str
+    original_branch: str
+    session: str

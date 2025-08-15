@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 import click
 from rich.console import Console
@@ -18,6 +18,7 @@ from .rebase_orchestrator import RebaseOrchestrator
 from .cli_prompt import CliPrompt
 from .cli_conflict_prompt import CliConflictPrompt
 from .models import RebaseError
+from lockstep_rebase import rebase_orchestrator
 
 
 console = Console()
@@ -126,6 +127,25 @@ def rebase(
 
             # Show commit mappings with auto-resolved commits organized by repository
             _display_commit_mappings(operation, resolution_summary)
+
+            # Prompt to delete backups
+            try:
+                backups = len(operation.backup_branches)
+            except Exception:
+                backups = 0
+            if backups:
+                if click.confirm(
+                    f"\nDelete {backups} backup branch(es) created for this rebase?", default=False
+                ):
+                    deleted = orchestrator.delete_backups(operation)
+                    console.print(
+                        f"🧹 Deleted {deleted} backup branch(es)", style="bold green"
+                    )
+                else:
+                    console.print(
+                        "🔒 Keeping backup branches. Use 'lockstep-rebase backups' to manage them.",
+                        style="yellow",
+                    )
         else:
             console.print("\n❌ **Rebase failed!**", style="bold red")
             sys.exit(1)
@@ -140,6 +160,124 @@ def rebase(
         sys.exit(1)
 
 
+@cli.group()
+@click.pass_context
+def backups(ctx: click.Context) -> None:
+    """Manage backup branches in the current repository."""
+    pass
+
+
+@backups.command("list")
+@click.option("--original-branch", "original_branch", type=str, help="Filter by original branch")
+@click.option("--repo-path", type=click.Path(exists=True, path_type=Path), help="Restrict to a single repository path")
+@click.pass_context
+def backups_list(ctx: click.Context, original_branch: str, repo_path: Optional[Path]) -> None:
+    """List backup branches. By default, lists across the repository hierarchy."""
+    try:
+        root = repo_path or ctx.obj.get("repo_path")
+        orchestrator = RebaseOrchestrator(root)
+
+        if repo_path:
+            entries = orchestrator.list_parsed_backups_in_repo(repo_path, original_branch=original_branch)
+        else:
+            entries = orchestrator.list_backups_across_hierarchy(original_branch=original_branch)
+
+        if not entries:
+            console.print("No backup branches found.")
+            return
+
+        table = Table(show_header=True, header_style="bold magenta")
+        table.add_column("Repository", style="cyan")
+        table.add_column("Path", style="dim")
+        table.add_column("Backup Branch", style="cyan")
+        table.add_column("Original Branch", style="green")
+        table.add_column("Session", style="yellow")
+
+        # Sort by repo then original branch then session desc
+        entries_sorted = sorted(entries, key=lambda e: (e.repo_name, e.original_branch, e.session), reverse=False)
+        for e in entries_sorted:
+            table.add_row(e.repo_name, str(e.repo_path.relative_to(orchestrator.root_path)), e.backup_branch, e.original_branch, e.session)
+
+        console.print(table)
+    except Exception as e:
+        console.print(f"\n❌ **Error listing backups:** {e}", style="bold red")
+        sys.exit(1)
+
+
+@backups.command("delete")
+@click.option("--branch", "backup_branch", multiple=True, help="Backup branch to delete (repeatable)")
+@click.option("--all", "delete_all", is_flag=True, help="Delete all backup branches")
+@click.option("--repo-path", type=click.Path(exists=True, path_type=Path), help="Repository path")
+@click.pass_context
+def backups_delete(
+    ctx: click.Context, backup_branch: List[str], delete_all: bool, repo_path: Optional[Path]
+) -> None:
+    """Delete backup branches (interactive if no options provided)."""
+    try:
+        orchestrator = RebaseOrchestrator(repo_path or ctx.obj.get("repo_path"))
+        target_path = repo_path or ctx.obj.get("repo_path")
+        branches = orchestrator.list_backups_in_repo(target_path)
+
+        if delete_all:
+            count = 0
+            for b in branches:
+                if orchestrator.delete_backup_in_repo(b, target_path):
+                    count += 1
+            console.print(f"🧹 Deleted {count} backup branch(es)")
+            return
+
+        to_delete = list(backup_branch)
+        if not to_delete:
+            if not branches:
+                console.print("No backup branches to delete.")
+                return
+            console.print("Select backups to delete:")
+            for idx, b in enumerate(sorted(branches), 1):
+                console.print(f"  {idx}. {b}")
+            choices = click.prompt(
+                "Enter numbers separated by commas (or empty to cancel)", default=""
+            )
+            if not choices.strip():
+                console.print("Cancelled.")
+                return
+            try:
+                indices = {int(x.strip()) for x in choices.split(",") if x.strip()}
+            except ValueError:
+                console.print("Invalid selection.")
+                sys.exit(1)
+            sorted_branches = list(sorted(branches))
+            for i in indices:
+                if 1 <= i <= len(sorted_branches):
+                    to_delete.append(sorted_branches[i - 1])
+
+        count = 0
+        for b in to_delete:
+            if orchestrator.delete_backup_in_repo(b, target_path):
+                count += 1
+        console.print(f"🧹 Deleted {count} backup branch(es)")
+    except Exception as e:
+        console.print(f"\n❌ **Error deleting backups:** {e}", style="bold red")
+        sys.exit(1)
+
+
+@backups.command("restore")
+@click.argument("original_branch")
+@click.option("--session-id", type=str, help="Session id (timestamp) of backup to restore")
+@click.pass_context
+def backups_restore(ctx: click.Context, original_branch: str, session_id: Optional[str]) -> None:
+    """Restore the original branch across the hierarchy from backups."""
+    try:
+        orchestrator = RebaseOrchestrator(ctx.obj.get("repo_path"))
+        restored = orchestrator.restore_original_branches_across_hierarchy(
+            original_branch, session_id=session_id
+        )
+        if restored == 0:
+            console.print("No matching backups found.")
+        else:
+            console.print(f"✅ Restored original branch in {restored} repos")
+    except Exception as e:
+        console.print(f"\n❌ **Error restoring backups:** {e}", style="bold red")
+        sys.exit(1)
 @cli.command()
 @click.pass_context
 def status(ctx: click.Context) -> None:
