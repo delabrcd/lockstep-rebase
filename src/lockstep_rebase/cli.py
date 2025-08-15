@@ -58,9 +58,34 @@ def cli(ctx: click.Context, verbose: bool, repo_path: Optional[Path]) -> None:
 @click.argument("target_branch")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without executing")
 @click.option("--force", is_flag=True, help="Force rebase even with validation warnings")
+@click.option(
+    "--include",
+    "includes",
+    multiple=True,
+    help="Include only these repositories (name or relative path). Repeatable.",
+)
+@click.option(
+    "--exclude",
+    "excludes",
+    multiple=True,
+    help="Exclude these repositories (name or relative path). Repeatable.",
+)
+@click.option(
+    "--branch-map",
+    "branch_map_items",
+    multiple=True,
+    help="Per-repo branch mapping: repo=SRC[:TGT]. Repeatable.",
+)
 @click.pass_context
 def rebase(
-    ctx: click.Context, source_branch: str, target_branch: str, dry_run: bool, force: bool
+    ctx: click.Context,
+    source_branch: str,
+    target_branch: str,
+    dry_run: bool,
+    force: bool,
+    includes: tuple[str, ...],
+    excludes: tuple[str, ...],
+    branch_map_items: tuple[str, ...],
 ) -> None:
     """
     Rebase SOURCE_BRANCH onto TARGET_BRANCH across all submodules.
@@ -82,6 +107,22 @@ def rebase(
             for line in hierarchy_lines:
                 console.print(line)
 
+        # Parse include/exclude and branch map
+        include_set = {s.strip() for s in includes if s.strip()}
+        exclude_set = {s.strip() for s in excludes if s.strip()}
+
+        branch_map: dict[str, tuple[str, str | None]] = {}
+        for item in branch_map_items:
+            if not item or "=" not in item:
+                continue
+            key, val = item.split("=", 1)
+            key = key.strip()
+            src, sep, tgt = val.partition(":")
+            src = src.strip()
+            tgt = tgt.strip() if sep else None
+            if key and src:
+                branch_map[key] = (src, tgt or None)
+
         # Validate repository state
         validation_errors = orchestrator.validate_repository_state(prompt)
         if validation_errors and not force:
@@ -102,7 +143,14 @@ def rebase(
         console.print(f"Source Branch: {source_branch}")
         console.print(f"Target Branch: {target_branch}")
 
-        operation = orchestrator.plan_rebase(source_branch, target_branch, prompt)
+        operation = orchestrator.plan_rebase(
+            source_branch,
+            target_branch,
+            prompt,
+            include=include_set or None,
+            exclude=exclude_set or None,
+            branch_map=branch_map or None,
+        )
 
         # Show rebase plan
         _display_rebase_plan(operation)
