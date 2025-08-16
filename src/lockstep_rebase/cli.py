@@ -59,6 +59,12 @@ def cli(ctx: click.Context, verbose: bool, repo_path: Optional[Path]) -> None:
 @click.option("--dry-run", is_flag=True, help="Show what would be done without executing")
 @click.option("--force", is_flag=True, help="Force rebase even with validation warnings")
 @click.option(
+    "--auto-select-submodules",
+    "auto_select_submodules",
+    is_flag=True,
+    help="Auto-discover updated submodules and interactively select branches",
+)
+@click.option(
     "--include",
     "includes",
     multiple=True,
@@ -83,6 +89,7 @@ def rebase(
     target_branch: str,
     dry_run: bool,
     force: bool,
+    auto_select_submodules: bool,
     includes: tuple[str, ...],
     excludes: tuple[str, ...],
     branch_map_items: tuple[str, ...],
@@ -143,14 +150,25 @@ def rebase(
         console.print(f"Source Branch: {source_branch}")
         console.print(f"Target Branch: {target_branch}")
 
-        operation = orchestrator.plan_rebase(
-            source_branch,
-            target_branch,
-            prompt,
-            include=include_set or None,
-            exclude=exclude_set or None,
-            branch_map=branch_map or None,
-        )
+        if auto_select_submodules:
+            console.print("Mode: Auto-discovery of updated submodules ✅")
+            operation = orchestrator.plan_rebase_auto(
+                source_branch,
+                target_branch,
+                prompt,
+                include=include_set or None,
+                exclude=exclude_set or None,
+                branch_map_overrides=branch_map or None,
+            )
+        else:
+            operation = orchestrator.plan_rebase(
+                source_branch,
+                target_branch,
+                prompt,
+                include=include_set or None,
+                exclude=exclude_set or None,
+                branch_map=branch_map or None,
+            )
 
         # Show rebase plan
         _display_rebase_plan(operation)

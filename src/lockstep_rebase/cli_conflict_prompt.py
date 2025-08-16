@@ -49,7 +49,7 @@ class CliConflictPrompt(ConflictPrompt):
 
         # Create instructions panel
         instructions = [
-            f"1. Navigate to: {repo_info.path}",
+            f"1. Navigate to: {repo_info.relative_path}",
             "2. Resolve the conflicts in the files/submodules listed above",
             "3. Stage your changes: `git add <resolved-files>`",
             "4. Do NOT commit - just stage the resolved files",
