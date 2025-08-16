@@ -54,14 +54,11 @@ class GitManager:
                 f"No Git repository found at {self.repo_path} or any parent directory"
             ) from e
 
-    def get_repo_info(self, repo_path: Optional[Path] = None) -> RepoInfo:
-        """Get repository information."""
-        if repo_path is None:
-            repo_path = Path(self.repo.working_dir)
-
+    def get_repo_info(self) -> RepoInfo:
+        """Get repository information for this instance's repo."""
+        repo_path = Path(self.repo.working_dir)
         repo_name = repo_path.name
         is_submodule = self._is_submodule(repo_path)
-
         return RepoInfo(path=repo_path, name=repo_name, is_submodule=is_submodule)
 
     def _is_submodule(self, repo_path: Path) -> bool:
@@ -73,13 +70,10 @@ class GitManager:
         except Exception:
             return False
 
-    def branch_exists(self, branch_name: str, repo_path: Optional[Path] = None) -> bool:
+    def branch_exists(self, branch_name: str) -> bool:
         """Check if a local branch exists (supports full names with slashes)."""
         try:
-            if repo_path and repo_path != Path(self.repo.working_dir):
-                temp_repo = Repo(repo_path)
-            else:
-                temp_repo = self.repo
+            temp_repo = self.repo
 
             # Local heads only
             head_names = [h.name for h in temp_repo.heads]
@@ -90,15 +84,10 @@ class GitManager:
             logger.error(f"Error checking branch existence: {e}")
             return False
 
-    def remote_branch_exists(
-        self, branch_name: str, remote_name: str = "origin", repo_path: Optional[Path] = None
-    ) -> bool:
+    def remote_branch_exists(self, branch_name: str, remote_name: str = "origin") -> bool:
         """Check if a remote branch exists (e.g., origin/feature/x)."""
         try:
-            if repo_path and repo_path != Path(self.repo.working_dir):
-                temp_repo = Repo(repo_path)
-            else:
-                temp_repo = self.repo
+            temp_repo = self.repo
 
             remote = temp_repo.remote(remote_name)
             remote_ref_names = [ref.name for ref in remote.refs]
@@ -111,53 +100,37 @@ class GitManager:
             logger.error(f"Error checking remote branch existence: {e}")
             return False
 
-    def get_current_branch(self, repo_path: Optional[Path] = None) -> str:
+    def get_current_branch(self) -> str:
         """Get the current branch name."""
         try:
-            if repo_path and repo_path != Path(self.repo.working_dir):
-                temp_repo = Repo(repo_path)
-                return temp_repo.active_branch.name
-            else:
-                return self.repo.active_branch.name
+            return self.repo.active_branch.name
         except Exception as e:
             logger.error(f"Error getting current branch: {e}")
             raise GitRepositoryError(f"Could not determine current branch: {e}")
 
-    def checkout_branch(self, branch_name: str, repo_path: Optional[Path] = None) -> None:
+    def checkout_branch(self, branch_name: str) -> None:
         """Checkout a specific branch."""
         try:
-            if repo_path and repo_path != Path(self.repo.working_dir):
-                temp_repo = Repo(repo_path)
-                temp_repo.git.checkout(branch_name)
-            else:
-                self.repo.git.checkout(branch_name)
+            self.repo.git.checkout(branch_name)
 
             logger.info(f"Checked out branch: {branch_name}")
         except Exception as e:
             logger.error(f"Error checking out branch {branch_name}: {e}")
             raise GitRepositoryError(f"Failed to checkout branch {branch_name}: {e}")
 
-    def list_local_branches(self, repo_path: Optional[Path] = None) -> List[str]:
+    def list_local_branches(self) -> List[str]:
         """List local branch names (full names, including slashes)."""
         try:
-            if repo_path and repo_path != Path(self.repo.working_dir):
-                temp_repo = Repo(repo_path)
-            else:
-                temp_repo = self.repo
+            temp_repo = self.repo
             return [h.name for h in temp_repo.heads]
         except Exception as e:
             logger.error(f"Error listing local branches: {e}")
             return []
 
-    def create_or_update_branch(
-        self, branch_name: str, target: str, repo_path: Optional[Path] = None
-    ) -> None:
+    def create_or_update_branch(self, branch_name: str, target: str) -> None:
         """Create or force-update a local branch to point at target (commitish)."""
         try:
-            if repo_path and repo_path != Path(self.repo.working_dir):
-                temp_repo = Repo(repo_path)
-            else:
-                temp_repo = self.repo
+            temp_repo = self.repo
 
             current = None
             try:
@@ -176,22 +149,16 @@ class GitManager:
             logger.error(f"Error creating/updating branch {branch_name}: {e}")
             raise GitRepositoryError(f"Failed to create/update branch {branch_name}: {e}")
 
-    def delete_branch(self, branch_name: str, repo_path: Optional[Path] = None) -> None:
+    def delete_branch(self, branch_name: str) -> None:
         """Delete a local branch (force)."""
         try:
-            if repo_path and repo_path != Path(self.repo.working_dir):
-                temp_repo = Repo(repo_path)
-                temp_repo.git.branch("-D", branch_name)
-            else:
-                self.repo.git.branch("-D", branch_name)
+            self.repo.git.branch("-D", branch_name)
             logger.info(f"Deleted branch {branch_name}")
         except Exception as e:
             logger.error(f"Error deleting branch {branch_name}: {e}")
             raise GitRepositoryError(f"Failed to delete branch {branch_name}: {e}")
 
-    def create_local_branch_from_remote(
-        self, branch_name: str, remote_name: str = "origin", repo_path: Optional[Path] = None
-    ) -> None:
+    def create_local_branch_from_remote(self, branch_name: str, remote_name: str = "origin") -> None:
         """Create a local branch from a remote-tracking branch.
 
         This creates or updates a local branch named `branch_name` to point at
@@ -199,10 +166,7 @@ class GitManager:
         for rebase planning, so this function does not configure it.
         """
         try:
-            if repo_path and repo_path != Path(self.repo.working_dir):
-                temp_repo = Repo(repo_path)
-            else:
-                temp_repo = self.repo
+            temp_repo = self.repo
 
             remote_ref = f"{remote_name}/{branch_name}"
             # Ensure the remote ref exists in this repo
@@ -220,15 +184,10 @@ class GitManager:
                 f"Failed to create local branch {branch_name} from {remote_name}/{branch_name}: {e}"
             )
 
-    def get_commits_between(
-        self, base_branch: str, feature_branch: str, repo_path: Optional[Path] = None
-    ) -> List[CommitInfo]:
+    def get_commits_between(self, base_branch: str, feature_branch: str) -> List[CommitInfo]:
         """Get commits that would be rebased (commits in feature_branch not in base_branch)."""
         try:
-            if repo_path and repo_path != Path(self.repo.working_dir):
-                temp_repo = Repo(repo_path)
-            else:
-                temp_repo = self.repo
+            temp_repo = self.repo
 
             # Get commits in feature_branch that are not in base_branch
             commits = list(temp_repo.iter_commits(f"{base_branch}..{feature_branch}"))
@@ -250,9 +209,7 @@ class GitManager:
             logger.error(f"Error getting commits between branches: {e}")
             raise GitRepositoryError(f"Failed to get commits between branches: {e}")
 
-    def start_rebase(
-        self, target_branch: str, repo_path: Optional[Path] = None
-    ) -> Tuple[bool, List[str]]:
+    def start_rebase(self, target_branch: str) -> Tuple[bool, List[str]]:
         """
         Start a rebase operation.
 
@@ -260,10 +217,7 @@ class GitManager:
             Tuple of (success, conflict_files)
         """
         try:
-            if repo_path and repo_path != Path(self.repo.working_dir):
-                working_dir = repo_path
-            else:
-                working_dir = Path(self.repo.working_dir)
+            working_dir = Path(self.repo.working_dir)
 
             # Start the rebase
             result = subprocess.run(
@@ -274,15 +228,15 @@ class GitManager:
 
             if result.returncode == 0:
                 # Verify index/working tree are clean before declaring success
-                if not self.is_index_clean(working_dir):
-                    dirty = self.get_dirty_paths(working_dir)
+                if not self.is_index_clean():
+                    dirty = self.get_dirty_paths()
                     logger.error(f"Rebase completed but index is dirty: {dirty}")
                     raise GitRepositoryError("Rebase left repository with a dirty index")
                 logger.info("Rebase completed successfully")
                 return True, []
             else:
                 # Check for conflicts
-                conflict_files = self._get_conflict_files(working_dir)
+                conflict_files = self._get_conflict_files()
                 if conflict_files:
                     logger.warning(f"Rebase has conflicts in files: {conflict_files}")
                     return False, conflict_files
@@ -298,12 +252,12 @@ class GitManager:
             logger.error(f"Error during rebase: {e}")
             raise GitRepositoryError(f"Error during rebase: {e}")
 
-    def _get_conflict_files(self, repo_path: Path) -> List[str]:
+    def _get_conflict_files(self) -> List[str]:
         """Get list of files with merge conflicts."""
         try:
             result = subprocess.run(
                 ["git", "diff", "--name-only", "--diff-filter=U"],
-                cwd=repo_path,
+                cwd=Path(self.repo.working_dir),
                 capture_output=True,
                 text=True,
             )
@@ -316,23 +270,17 @@ class GitManager:
             logger.error(f"Error getting conflict files: {e}")
             return []
 
-    def get_conflict_files(self, repo_path: Optional[Path] = None) -> List[str]:
+    def get_conflict_files(self) -> List[str]:
         """Public wrapper to return unresolved merge paths (files and gitlinks)."""
         try:
-            working_dir = (
-                repo_path if (repo_path and repo_path != Path(self.repo.working_dir)) else Path(self.repo.working_dir)
-            )
-            return self._get_conflict_files(working_dir)
+            return self._get_conflict_files()
         except Exception:
             return []
 
-    def continue_rebase(self, repo_path: Optional[Path] = None) -> Tuple[bool, List[str]]:
+    def continue_rebase(self) -> Tuple[bool, List[str]]:
         """Continue a rebase after conflicts are resolved."""
         try:
-            if repo_path and repo_path != Path(self.repo.working_dir):
-                working_dir = repo_path
-            else:
-                working_dir = Path(self.repo.working_dir)
+            working_dir = Path(self.repo.working_dir)
 
             # Set environment to avoid interactive commit message prompts
             env = os.environ.copy()
@@ -348,15 +296,15 @@ class GitManager:
 
             if result.returncode == 0:
                 # Verify index/working tree are clean before declaring success
-                if not self.is_index_clean(working_dir):
-                    dirty = self.get_dirty_paths(working_dir)
+                if not self.is_index_clean():
+                    dirty = self.get_dirty_paths()
                     logger.error(f"Rebase continued but index is dirty: {dirty}")
                     raise GitRepositoryError("Rebase continue left repository with a dirty index")
                 logger.info("Rebase continued successfully")
                 return True, []
             else:
                 # Check for more conflicts
-                conflict_files = self._get_conflict_files(working_dir)
+                conflict_files = self._get_conflict_files()
                 if conflict_files:
                     logger.warning(f"Rebase still has conflicts: {conflict_files}")
                     return False, conflict_files
@@ -368,13 +316,10 @@ class GitManager:
             logger.error(f"Error continuing rebase: {e}")
             raise GitRepositoryError(f"Error continuing rebase: {e}")
 
-    def abort_rebase(self, repo_path: Optional[Path] = None) -> None:
+    def abort_rebase(self) -> None:
         """Abort a rebase operation."""
         try:
-            if repo_path and repo_path != Path(self.repo.working_dir):
-                working_dir = repo_path
-            else:
-                working_dir = Path(self.repo.working_dir)
+            working_dir = Path(self.repo.working_dir)
 
             subprocess.run(["git", "rebase", "--abort"], cwd=working_dir, check=True)
 
@@ -383,13 +328,10 @@ class GitManager:
             logger.error(f"Failed to abort rebase: {e}")
             raise GitRepositoryError(f"Failed to abort rebase: {e}")
 
-    def is_rebase_in_progress(self, repo_path: Optional[Path] = None) -> bool:
+    def is_rebase_in_progress(self) -> bool:
         """Check if a rebase is currently in progress."""
         try:
-            if repo_path and repo_path != Path(self.repo.working_dir):
-                git_dir = repo_path / ".git"
-            else:
-                git_dir = Path(self.repo.git_dir)
+            git_dir = Path(self.repo.git_dir)
 
             # Check for rebase-related files
             rebase_files = [git_dir / "rebase-merge", git_dir / "rebase-apply"]
@@ -399,15 +341,10 @@ class GitManager:
             logger.error(f"Error checking rebase status: {e}")
             return False
 
-    def get_updated_commits(
-        self, original_commits: List[CommitInfo], repo_path: Optional[Path] = None
-    ) -> List[CommitInfo]:
+    def get_updated_commits(self, original_commits: List[CommitInfo]) -> List[CommitInfo]:
         """Get the updated commit information after a rebase."""
         try:
-            if repo_path and repo_path != Path(self.repo.working_dir):
-                temp_repo = Repo(repo_path)
-            else:
-                temp_repo = self.repo
+            temp_repo = self.repo
 
             # Get recent commits (same number as original commits)
             recent_commits = list(temp_repo.iter_commits(max_count=len(original_commits)))
@@ -430,10 +367,10 @@ class GitManager:
             raise GitRepositoryError(f"Failed to get updated commits: {e}")
 
     # --- Generic Git helpers used by ConflictResolver and others ---
-    def is_submodule_path(self, repo_path: Path, filepath: str) -> bool:
+    def is_submodule_path(self, filepath: str) -> bool:
         """Return True if the given path corresponds to a submodule entry in repo."""
         try:
-            gitmodules_path = repo_path / ".gitmodules"
+            gitmodules_path = Path(self.repo.working_dir) / ".gitmodules"
             if not gitmodules_path.exists():
                 return False
             content = gitmodules_path.read_text(encoding="utf-8", errors="ignore")
@@ -441,7 +378,7 @@ class GitManager:
         except Exception:
             return False
 
-    def get_unmerged_index_entries(self, repo_path: Path, path: str) -> List[dict]:
+    def get_unmerged_index_entries(self, path: str) -> List[dict]:
         """Return parsed entries from `git ls-files -u -- <path>` for an unmerged path.
 
         Each entry is a dict with keys: stage, hash, path
@@ -449,7 +386,7 @@ class GitManager:
         try:
             result = subprocess.run(
                 ["git", "ls-files", "-u", "--", path],
-                cwd=repo_path,
+                cwd=Path(self.repo.working_dir),
                 capture_output=True,
                 text=True,
                 check=True,
@@ -473,35 +410,29 @@ class GitManager:
         except Exception:
             return []
 
-    def checkout_commit(self, commitish: str, repo_path: Optional[Path] = None) -> None:
+    def checkout_commit(self, commitish: str) -> None:
         """Checkout a commit-ish in the specified repository path."""
         try:
-            working_dir = (
-                repo_path if (repo_path and repo_path != Path(self.repo.working_dir)) else Path(self.repo.working_dir)
-            )
+            working_dir = Path(self.repo.working_dir)
             subprocess.run(["git", "checkout", commitish], cwd=working_dir, check=True, capture_output=True)
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to checkout {commitish} in {working_dir}: {e}")
             raise GitRepositoryError(f"Failed to checkout {commitish}: {e}")
 
-    def add_paths(self, paths: List[str], repo_path: Optional[Path] = None) -> None:
+    def add_paths(self, paths: List[str]) -> None:
         """Stage the given paths in the specified repository path."""
         try:
-            working_dir = (
-                repo_path if (repo_path and repo_path != Path(self.repo.working_dir)) else Path(self.repo.working_dir)
-            )
+            working_dir = Path(self.repo.working_dir)
             for p in paths:
                 subprocess.run(["git", "add", p], cwd=working_dir, check=True, capture_output=True)
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to add paths {paths} in {working_dir}: {e}")
             raise GitRepositoryError(f"Failed to stage paths: {e}")
 
-    def get_commit_subject(self, commit_hash: str, repo_path: Optional[Path] = None) -> Optional[str]:
+    def get_commit_subject(self, commit_hash: str) -> Optional[str]:
         """Return the one-line subject for a commit hash in the given repo."""
         try:
-            working_dir = (
-                repo_path if (repo_path and repo_path != Path(self.repo.working_dir)) else Path(self.repo.working_dir)
-            )
+            working_dir = Path(self.repo.working_dir)
             result = subprocess.run(
                 ["git", "log", "-1", "--format=%s", commit_hash],
                 cwd=working_dir,
@@ -515,15 +446,13 @@ class GitManager:
         except Exception:
             return None
 
-    def get_short_commit_for_ref(self, ref: str, repo_path: Optional[Path] = None) -> Optional[str]:
+    def get_short_commit_for_ref(self, ref: str) -> Optional[str]:
         """Return the short commit hash for a given ref name (branch, tag, or remote ref).
 
         Example refs: 'main', 'feature/x', 'origin/main', 'HEAD'.
         """
         try:
-            working_dir = (
-                repo_path if (repo_path and repo_path != Path(self.repo.working_dir)) else Path(self.repo.working_dir)
-            )
+            working_dir = Path(self.repo.working_dir)
             result = subprocess.run(
                 ["git", "rev-parse", "--short", ref],
                 cwd=working_dir,
@@ -538,12 +467,10 @@ class GitManager:
         except Exception:
             return None
 
-    def get_staged_files(self, repo_path: Optional[Path] = None) -> List[str]:
+    def get_staged_files(self) -> List[str]:
         """Return list of staged (cached) paths (names only)."""
         try:
-            working_dir = (
-                repo_path if (repo_path and repo_path != Path(self.repo.working_dir)) else Path(self.repo.working_dir)
-            )
+            working_dir = Path(self.repo.working_dir)
             result = subprocess.run(
                 ["git", "diff", "--cached", "--name-only"],
                 cwd=working_dir,
@@ -557,12 +484,10 @@ class GitManager:
         except Exception:
             return []
 
-    def has_unstaged_changes(self, repo_path: Optional[Path] = None) -> bool:
+    def has_unstaged_changes(self) -> bool:
         """Return True if there are unstaged changes in the working tree."""
         try:
-            working_dir = (
-                repo_path if (repo_path and repo_path != Path(self.repo.working_dir)) else Path(self.repo.working_dir)
-            )
+            working_dir = Path(self.repo.working_dir)
             # Use --quiet for efficiency; returncode 1 means changes present
             result = subprocess.run(
                 ["git", "diff", "--quiet"], cwd=working_dir
@@ -572,9 +497,7 @@ class GitManager:
             return False
 
     # --- Helpers for submodule auto-discovery ---
-    def get_submodule_pointer_at(
-        self, branch: str, submodule_path: str, repo_path: Optional[Path] = None
-    ) -> Optional[str]:
+    def get_submodule_pointer_at(self, branch: str, submodule_path: str) -> Optional[str]:
         """Return the gitlink SHA for a submodule path at a given branch in the parent repo.
 
         Args:
@@ -586,11 +509,7 @@ class GitManager:
             The gitlink SHA (40-hex) if present, otherwise None.
         """
         try:
-            working_dir = (
-                repo_path
-                if (repo_path and repo_path != Path(self.repo.working_dir))
-                else Path(self.repo.working_dir)
-            )
+            working_dir = Path(self.repo.working_dir)
             # Use ls-tree to read the tree entry; gitlink mode is 160000 and type 'commit'
             result = subprocess.run(
                 ["git", "ls-tree", branch, "--", submodule_path],
@@ -613,11 +532,7 @@ class GitManager:
             return None
 
     def submodule_changed_between(
-        self,
-        base_branch: str,
-        feature_branch: str,
-        submodule_path: str,
-        repo_path: Optional[Path] = None,
+        self, base_branch: str, feature_branch: str, submodule_path: str
     ) -> bool:
         """Return True if the submodule entry changed between base..feature in the parent repo.
 
@@ -625,11 +540,7 @@ class GitManager:
         any commits that touched the gitlink entry.
         """
         try:
-            working_dir = (
-                repo_path
-                if (repo_path and repo_path != Path(self.repo.working_dir))
-                else Path(self.repo.working_dir)
-            )
+            working_dir = Path(self.repo.working_dir)
             result = subprocess.run(
                 [
                     "git",
@@ -655,19 +566,14 @@ class GitManager:
             )
             return False
 
-    def branches_containing_commit(
-        self, commit_sha: str, repo_path: Optional[Path] = None, include_remotes: bool = True
-    ) -> Tuple[List[str], List[str]]:
+    def branches_containing_commit(self, commit_sha: str, include_remotes: bool = True) -> Tuple[List[str], List[str]]:
         """Return (local_branches, remote_branches) that contain the given commit.
 
         Remote branch names are returned with their full refs as shown by `git branch -r`
         (e.g., "origin/feature/x"). Local branches are returned as their short names.
         """
         try:
-            if repo_path and repo_path != Path(self.repo.working_dir):
-                temp_repo = Repo(repo_path)
-            else:
-                temp_repo = self.repo
+            temp_repo = self.repo
 
             local_branches: List[str] = []
             try:
@@ -719,29 +625,23 @@ class GitManager:
             return [], []
 
     # --- Remote synchronization helpers ---
-    def fetch_remote(self, remote_name: str = "origin", repo_path: Optional[Path] = None) -> None:
+    def fetch_remote(self, remote_name: str = "origin") -> None:
         """Fetch updates from a remote."""
         try:
-            working_dir = (
-                repo_path if (repo_path and repo_path != Path(self.repo.working_dir)) else Path(self.repo.working_dir)
-            )
+            working_dir = Path(self.repo.working_dir)
             subprocess.run(["git", "fetch", "--prune", remote_name], cwd=working_dir, check=True)
             logger.info(f"Fetched updates from {remote_name} in {working_dir}")
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to fetch from {remote_name}: {e}")
             raise GitRepositoryError(f"Failed to fetch from {remote_name}: {e}")
 
-    def branch_ahead_behind(
-        self, branch_name: str, remote_name: str = "origin", repo_path: Optional[Path] = None
-    ) -> Tuple[int, int]:
+    def branch_ahead_behind(self, branch_name: str, remote_name: str = "origin") -> Tuple[int, int]:
         """Return (ahead, behind) counts of local branch vs remote/branch.
 
         If the remote ref does not exist, returns (0, 0).
         """
         try:
-            working_dir = (
-                repo_path if (repo_path and repo_path != Path(self.repo.working_dir)) else Path(self.repo.working_dir)
-            )
+            working_dir = Path(self.repo.working_dir)
             remote_ref = f"{remote_name}/{branch_name}"
             # If remote ref doesn't exist, treat as in sync for our purposes
             try:
@@ -773,27 +673,20 @@ class GitManager:
         except Exception:
             return 0, 0
 
-    def is_branch_up_to_date_with_remote(
-        self, branch_name: str, remote_name: str = "origin", repo_path: Optional[Path] = None
-    ) -> bool:
+    def is_branch_up_to_date_with_remote(self, branch_name: str, remote_name: str = "origin") -> bool:
         """Return True if local branch is not behind its remote tracking branch."""
-        ahead, behind = self.branch_ahead_behind(branch_name, remote_name, repo_path)
+        ahead, behind = self.branch_ahead_behind(branch_name, remote_name)
         return behind == 0
 
-    def fast_forward_branch_to_remote(
-        self, branch_name: str, remote_name: str = "origin", repo_path: Optional[Path] = None
-    ) -> None:
+    def fast_forward_branch_to_remote(self, branch_name: str, remote_name: str = "origin") -> None:
         """Fast-forward local branch to remote/branch if possible.
 
         If the branch is currently checked out, performs a --ff-only merge from
         the remote ref. Otherwise, force-moves the branch ref to the remote tip.
         """
         try:
-            working_dir = (
-                repo_path if (repo_path and repo_path != Path(self.repo.working_dir)) else Path(self.repo.working_dir)
-            )
+            working_dir = Path(self.repo.working_dir)
             remote_ref = f"{remote_name}/{branch_name}"
-
             temp_repo = Repo(working_dir)
             current_branch = None
             try:
@@ -816,12 +709,10 @@ class GitManager:
             raise GitRepositoryError(f"Error fast-forwarding {branch_name}: {e}")
 
     # --- Working tree / index cleanliness ---
-    def is_index_clean(self, repo_path: Optional[Path] = None) -> bool:
+    def is_index_clean(self) -> bool:
         """Return True if there are no staged or unstaged changes (untracked ignored)."""
         try:
-            working_dir = (
-                repo_path if (repo_path and repo_path != Path(self.repo.working_dir)) else Path(self.repo.working_dir)
-            )
+            working_dir = Path(self.repo.working_dir)
             # No unstaged changes
             res_wt = subprocess.run(["git", "diff", "--quiet"], cwd=working_dir)
             if res_wt.returncode != 0:
@@ -838,12 +729,10 @@ class GitManager:
         except Exception:
             return False
 
-    def get_dirty_paths(self, repo_path: Optional[Path] = None) -> List[str]:
+    def get_dirty_paths(self) -> List[str]:
         """Return list of paths that are staged or unstaged (untracked ignored)."""
         try:
-            working_dir = (
-                repo_path if (repo_path and repo_path != Path(self.repo.working_dir)) else Path(self.repo.working_dir)
-            )
+            working_dir = Path(self.repo.working_dir)
             result = subprocess.run(
                 ["git", "status", "--porcelain"], cwd=working_dir, capture_output=True, text=True
             )

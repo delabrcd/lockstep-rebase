@@ -383,7 +383,6 @@ def test_cli_rebase_auto_flag_forwarded(mock_conflict_prompt_cls, mock_prompt_cl
     mock_orch.validate_repository_state.return_value = []
     mock_operation = MagicMock()
     mock_operation.repo_states = []
-    mock_operation.global_commit_mapping = {}
     mock_orch.plan_rebase_auto.return_value = mock_operation
     mock_orch_cls.return_value = mock_orch
 
@@ -394,7 +393,6 @@ def test_cli_rebase_auto_flag_forwarded(mock_conflict_prompt_cls, mock_prompt_cl
             "src",
             "tgt",
             "--dry-run",
-            "--auto-select-submodules",
             "--include",
             "libA",
             "--exclude",

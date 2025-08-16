@@ -219,8 +219,8 @@ class SubmoduleMapper:
         try:
             gm = GitManager(Path(repo.working_dir))
             # Check if branch exists locally / remotely via GitManager
-            local_exists = gm.branch_exists(branch_name, repo_info.path)
-            remote_exists = gm.remote_branch_exists(branch_name, "origin", repo_info.path)
+            local_exists = gm.branch_exists(branch_name)
+            remote_exists = gm.remote_branch_exists(branch_name, "origin")
 
             if local_exists:
                 result["exists"] = True
@@ -252,7 +252,7 @@ class SubmoduleMapper:
                 if prompt.confirm_use_remote_branch(repo_info.name, branch_name):
                     if prompt.confirm_create_local_branch(repo_info.name, branch_name):
                         # Delegate creation to GitManager to avoid duplication
-                        gm.create_local_branch_from_remote(branch_name, "origin", repo_info.path)
+                        gm.create_local_branch_from_remote(branch_name, "origin")
                         result["exists"] = True
                     else:
                         # Use remote branch directly (checkout will handle this)
@@ -268,7 +268,7 @@ class SubmoduleMapper:
         """Check if a branch exists locally (delegates to GitManager)."""
         try:
             gm = GitManager(Path(repo.working_dir))
-            return gm.branch_exists(branch_name, Path(repo.working_dir))
+            return gm.branch_exists(branch_name)
         except Exception as e:
             logger.debug(f"Error checking local branches: {e}")
             return False
@@ -279,7 +279,7 @@ class SubmoduleMapper:
         """Check if a branch exists on remote (delegates to GitManager)."""
         try:
             gm = GitManager(Path(repo.working_dir))
-            return gm.remote_branch_exists(branch_name, remote_name, Path(repo.working_dir))
+            return gm.remote_branch_exists(branch_name, remote_name)
         except Exception as e:
             logger.debug(f"Error checking remote branches: {e}")
             return False
@@ -340,7 +340,7 @@ class SubmoduleMapper:
         """Create a local branch from a remote-tracking branch (delegates to GitManager)."""
         try:
             gm = GitManager(Path(repo.working_dir))
-            gm.create_local_branch_from_remote(branch_name, remote_name, Path(repo.working_dir))
+            gm.create_local_branch_from_remote(branch_name, remote_name)
         except Exception as e:
             logger.error(f"Error creating local branch {branch_name}: {e}")
             raise

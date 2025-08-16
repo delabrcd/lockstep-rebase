@@ -5,6 +5,8 @@ Command-line interface for the Git submodule rebase tool.
 from __future__ import annotations
 
 import logging
+from logging.handlers import RotatingFileHandler
+import os
 import sys
 from pathlib import Path
 from typing import Optional, List
@@ -24,32 +26,88 @@ from .models import RebaseError
 console = Console()
 
 
-def setup_logging(verbose: bool = False) -> None:
-    """Setup logging configuration."""
-    level = logging.DEBUG if verbose else logging.INFO
+def _default_log_path() -> Path:
+    """Determine default log file path (~/.lockstep-rebase/lockstep-rebase.log)."""
+    env_path = os.environ.get("LOCKSTEP_REBASE_LOG")
+    if env_path:
+        p = Path(env_path).expanduser()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+    base = Path.home() / ".lockstep-rebase"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "lockstep-rebase.log"
 
-    logging.basicConfig(
-        level=level,
-        format="%(message)s",
-        datefmt="[%X]",
-        handlers=[RichHandler(console=console, rich_tracebacks=True)],
+
+def setup_logging(verbose: bool = False, console_level: Optional[str] = None, log_file: Optional[Path] = None) -> Path:
+    """Setup logging:
+    - Always log to a rotating file at DEBUG level by default
+    - Console logging disabled by default; enable via --verbose or --log-level
+    Returns the path to the log file.
+    """
+    log_path = log_file or _default_log_path()
+
+    root = logging.getLogger()
+    # Clear existing handlers to avoid duplication in tests / repeated invocations
+    root.handlers.clear()
+    root.setLevel(logging.DEBUG)
+
+    # File handler (always on)
+    file_handler = RotatingFileHandler(str(log_path), maxBytes=1_000_000, backupCount=3)
+    file_handler.setLevel(logging.DEBUG)
+    file_fmt = logging.Formatter(
+        fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
+    file_handler.setFormatter(file_fmt)
+    root.addHandler(file_handler)
+
+    # Console handler (optional)
+    if verbose or console_level:
+        level_map = {
+            None: logging.INFO,
+            "debug": logging.DEBUG,
+            "info": logging.INFO,
+            "warning": logging.WARNING,
+            "error": logging.ERROR,
+        }
+        ch_level = level_map.get((console_level or "info").lower(), logging.INFO)
+        console_handler = RichHandler(console=console, rich_tracebacks=True)
+        console_handler.setLevel(ch_level)
+        console_handler.setFormatter(logging.Formatter("%(message)s"))
+        root.addHandler(console_handler)
+
+    return log_path
+
+
+def _maybe_print_log_notice(verbose: bool, console_level: Optional[str], log_path: Path) -> None:
+    """Inform user about logging destination and how to enable console logs."""
+    if verbose or console_level:
+        return
+    console.print(f"[dim]Logs are written to {log_path}. Console logs are disabled by default. Use -v or --log-level to enable.[/dim]")
 
 
 @click.group()
-@click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose console logging (INFO)")
+@click.option(
+    "--log-level",
+    type=click.Choice(["debug", "info", "warning", "error"], case_sensitive=False),
+    default=None,
+    help="Console log level. By default, console logging is disabled.",
+)
 @click.option(
     "--repo-path",
     type=click.Path(exists=True, path_type=Path),
     help="Path to repository (defaults to current directory)",
 )
 @click.pass_context
-def cli(ctx: click.Context, verbose: bool, repo_path: Optional[Path]) -> None:
+def cli(ctx: click.Context, verbose: bool, log_level: Optional[str], repo_path: Optional[Path]) -> None:
     """Git Submodule Rebase Tool - Professional rebase operations for tightly coupled submodules."""
-    setup_logging(verbose)
+    log_path = setup_logging(verbose, console_level=log_level)
 
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
+    ctx.obj["console_level"] = log_level
+    ctx.obj["log_path"] = log_path
     ctx.obj["repo_path"] = repo_path
 
 
@@ -59,10 +117,10 @@ def cli(ctx: click.Context, verbose: bool, repo_path: Optional[Path]) -> None:
 @click.option("--dry-run", is_flag=True, help="Show what would be done without executing")
 @click.option("--force", is_flag=True, help="Force rebase even with validation warnings")
 @click.option(
-    "--auto-select-submodules",
-    "auto_select_submodules",
+    "--no-auto-planning",
+    "no_auto_planning",
     is_flag=True,
-    help="Auto-discover updated submodules and interactively select branches",
+    help="Disable auto-discovery planning (use manual planning instead)",
 )
 @click.option(
     "--include",
@@ -89,7 +147,7 @@ def rebase(
     target_branch: str,
     dry_run: bool,
     force: bool,
-    auto_select_submodules: bool,
+    no_auto_planning: bool,
     includes: tuple[str, ...],
     excludes: tuple[str, ...],
     branch_map_items: tuple[str, ...],
@@ -100,6 +158,7 @@ def rebase(
     Example: lockstep-rebase rebase feature/my-feature main
     """
     try:
+        _maybe_print_log_notice(ctx.obj.get("verbose"), ctx.obj.get("console_level"), ctx.obj.get("log_path"))
         conflict_prompt = CliConflictPrompt(console)
         orchestrator = RebaseOrchestrator(ctx.obj.get("repo_path"), conflict_prompt)
         prompt = CliPrompt(console)
@@ -150,7 +209,17 @@ def rebase(
         console.print(f"Source Branch: {source_branch}")
         console.print(f"Target Branch: {target_branch}")
 
-        if auto_select_submodules:
+        if no_auto_planning:
+            console.print("Mode: Manual planning (auto-discovery disabled) 🚫")
+            operation = orchestrator.plan_rebase(
+                source_branch,
+                target_branch,
+                prompt,
+                include=include_set or None,
+                exclude=exclude_set or None,
+                branch_map=branch_map or None,
+            )
+        else:
             console.print("Mode: Auto-discovery of updated submodules ✅")
             operation = orchestrator.plan_rebase_auto(
                 source_branch,
@@ -159,15 +228,6 @@ def rebase(
                 include=include_set or None,
                 exclude=exclude_set or None,
                 branch_map_overrides=branch_map or None,
-            )
-        else:
-            operation = orchestrator.plan_rebase(
-                source_branch,
-                target_branch,
-                prompt,
-                include=include_set or None,
-                exclude=exclude_set or None,
-                branch_map=branch_map or None,
             )
 
         # Show rebase plan
@@ -183,42 +243,37 @@ def rebase(
             return
 
         # Execute the rebase
-        if orchestrator.execute_rebase(operation):
-            console.print("\n🎉 **Rebase completed successfully!**", style="bold green")
-
-            # Get resolution summary for display
-            resolution_summary = None
-            if orchestrator.conflict_resolver.has_resolutions():
-                resolution_summary = orchestrator.conflict_resolver.get_resolution_summary()
-
-            # Show commit mappings with auto-resolved commits organized by repository
-            _display_commit_mappings(operation, resolution_summary)
-
-            # Prompt to delete backups
-            try:
-                backups = len(operation.backup_branches)
-            except Exception:
-                backups = 0
-            if backups:
-                if click.confirm(
-                    f"\nDelete {backups} backup branch(es) created for this rebase?", default=False
-                ):
-                    deleted = orchestrator.delete_backups(operation)
-                    console.print(
-                        f"🧹 Deleted {deleted} backup branch(es)", style="bold green"
-                    )
-                else:
-                    console.print(
-                        "🔒 Keeping backup branches. Use 'lockstep-rebase backups' to manage them.",
-                        style="yellow",
-                    )
-        else:
+        if not orchestrator.execute_rebase(operation):
             console.print("\n❌ **Rebase failed!**", style="bold red")
-            sys.exit(1)
+            return
+
+        console.print("\n🎉 **Rebase completed successfully!**", style="bold green")
+
+        # Get resolution summary for display (only if explicitly True)
+        resolution_summary = orchestrator.conflict_resolver.get_resolution_summary()
+        # Show commit mappings with auto-resolved commits organized by repository
+        _display_commit_mappings(resolution_summary)
+
+        # Prompt to delete backups
+        backups = len(operation.backup_branches)
+        if backups:
+            if click.confirm(
+                f"\nDelete {backups} backup branch(es) created for this rebase?", default=False
+            ):
+                deleted = orchestrator.delete_backups(operation)
+                console.print(f"🧹 Deleted {deleted} backup branch(es)", style="bold green")
+            else:
+                console.print(
+                    "🔒 Keeping backup branches. Use 'lockstep-rebase backups' to manage them.",
+                    style="yellow",
+                )
 
     except RebaseError as e:
         console.print(f"\n❌ **Rebase Error:** {e}", style="bold red")
         sys.exit(1)
+    except (click.Abort, KeyboardInterrupt):
+        console.print("\n\n🚫 **Operation cancelled by user**", style="bold yellow")
+        sys.exit(130)
     except Exception as e:
         console.print(f"\n💥 **Unexpected Error:** {e}", style="bold red")
         if ctx.obj.get("verbose"):
@@ -236,19 +291,34 @@ def backups(ctx: click.Context) -> None:
 @backups.command("list")
 @click.option("--original-branch", "original_branch", type=str, help="Filter by original branch")
 @click.option("--session-id", type=str, help="Filter by session id (timestamp)")
-@click.option("--latest", is_flag=True, help="Show only the most recent session (ignored if --session-id is given)")
-@click.option("--repo-path", type=click.Path(exists=True, path_type=Path), help="Restrict to a single repository path")
+@click.option(
+    "--latest",
+    is_flag=True,
+    help="Show only the most recent session (ignored if --session-id is given)",
+)
+@click.option(
+    "--repo-path",
+    type=click.Path(exists=True, path_type=Path),
+    help="Restrict to a single repository path",
+)
 @click.pass_context
 def backups_list(
-    ctx: click.Context, original_branch: str, session_id: Optional[str], latest: bool, repo_path: Optional[Path]
+    ctx: click.Context,
+    original_branch: str,
+    session_id: Optional[str],
+    latest: bool,
+    repo_path: Optional[Path],
 ) -> None:
     """List backup branches. By default, lists across the repository hierarchy."""
     try:
+        _maybe_print_log_notice(ctx.obj.get("verbose"), ctx.obj.get("console_level"), ctx.obj.get("log_path"))
         root = repo_path or ctx.obj.get("repo_path")
         orchestrator = RebaseOrchestrator(root)
 
         if repo_path:
-            entries = orchestrator.list_parsed_backups_in_repo(repo_path, original_branch=original_branch)
+            entries = orchestrator.list_parsed_backups_in_repo(
+                repo_path, original_branch=original_branch
+            )
         else:
             entries = orchestrator.list_backups_across_hierarchy(original_branch=original_branch)
 
@@ -294,10 +364,20 @@ def backups_list(
 
 
 @backups.command("delete")
-@click.option("--branch", "backup_branch", multiple=True, help="Backup branch to delete (repeatable)")
+@click.option(
+    "--branch", "backup_branch", multiple=True, help="Backup branch to delete (repeatable)"
+)
 @click.option("--all", "delete_all", is_flag=True, help="Delete all backup branches")
-@click.option("--session-id", type=str, help="Delete all backups for a session (hierarchy-wide unless --repo-path is given)")
-@click.option("--latest", is_flag=True, help="Delete backups from the most recent session (ignored if --session-id is given)")
+@click.option(
+    "--session-id",
+    type=str,
+    help="Delete all backups for a session (hierarchy-wide unless --repo-path is given)",
+)
+@click.option(
+    "--latest",
+    is_flag=True,
+    help="Delete backups from the most recent session (ignored if --session-id is given)",
+)
 @click.option("--repo-path", type=click.Path(exists=True, path_type=Path), help="Repository path")
 @click.pass_context
 def backups_delete(
@@ -310,6 +390,7 @@ def backups_delete(
 ) -> None:
     """Delete backup branches (interactive if no options provided)."""
     try:
+        _maybe_print_log_notice(ctx.obj.get("verbose"), ctx.obj.get("console_level"), ctx.obj.get("log_path"))
         root = repo_path or ctx.obj.get("repo_path")
         orchestrator = RebaseOrchestrator(root)
 
@@ -385,14 +466,21 @@ def backups_delete(
 
 @backups.command("restore")
 @click.argument("original_branch", required=False)
-@click.option("--session-id", type=str, help="Session id (timestamp) of backup to restore. If provided without original_branch, restores all branches with that session.")
-@click.option("--latest", is_flag=True, help="Use most recent session if --session-id is not provided")
+@click.option(
+    "--session-id",
+    type=str,
+    help="Session id (timestamp) of backup to restore. If provided without original_branch, restores all branches with that session.",
+)
+@click.option(
+    "--latest", is_flag=True, help="Use most recent session if --session-id is not provided"
+)
 @click.pass_context
 def backups_restore(
     ctx: click.Context, original_branch: Optional[str], session_id: Optional[str], latest: bool
 ) -> None:
     """Restore the original branch across the hierarchy from backups."""
     try:
+        _maybe_print_log_notice(ctx.obj.get("verbose"), ctx.obj.get("console_level"), ctx.obj.get("log_path"))
         orchestrator = RebaseOrchestrator(ctx.obj.get("repo_path"))
 
         # If restoring by session only (no original branch specified)
@@ -447,11 +535,14 @@ def backups_restore(
     except Exception as e:
         console.print(f"\n❌ **Error restoring backups:** {e}", style="bold red")
         sys.exit(1)
+
+
 @cli.command()
 @click.pass_context
 def status(ctx: click.Context) -> None:
     """Show status of all repositories in the hierarchy."""
     try:
+        _maybe_print_log_notice(ctx.obj.get("verbose"), ctx.obj.get("console_level"), ctx.obj.get("log_path"))
         orchestrator = RebaseOrchestrator(ctx.obj.get("repo_path"))
 
         console.print("\n📊 **Repository Status**")
@@ -497,6 +588,7 @@ def status(ctx: click.Context) -> None:
 def hierarchy(ctx: click.Context) -> None:
     """Display the repository hierarchy."""
     try:
+        _maybe_print_log_notice(ctx.obj.get("verbose"), ctx.obj.get("console_level"), ctx.obj.get("log_path"))
         orchestrator = RebaseOrchestrator(ctx.obj.get("repo_path"))
         console.print("\n📁 **Repository Hierarchy**")
 
@@ -549,6 +641,7 @@ def hierarchy(ctx: click.Context) -> None:
 def validate(ctx: click.Context, source_branch: str, target_branch: str) -> None:
     """Validate that branches exist and repositories are ready for rebase."""
     try:
+        _maybe_print_log_notice(ctx.obj.get("verbose"), ctx.obj.get("console_level"), ctx.obj.get("log_path"))
         orchestrator = RebaseOrchestrator(ctx.obj.get("repo_path"))
 
         console.print("\n🔍 **Validating Rebase Prerequisites**")
@@ -604,59 +697,77 @@ def _display_rebase_plan(operation) -> None:
     console.print(table)
 
 
-def _display_commit_mappings(operation, resolution_summary=None) -> None:
+def _display_commit_mappings(resolution_summary=None) -> None:
     """Display commit hash mappings after successful rebase."""
-    if not operation.global_commit_mapping:
+    if not resolution_summary:
+        console.print("\n📦 **No auto-resolved commits found.**", style="bold yellow")
         return
 
-    console.print("\n🔗 **Commit Hash Mappings**")
+    # Only display if we have a concrete dict of resolved commits
+    try:
+        repos = getattr(resolution_summary, "resolved_commits_by_repo", None)
+    except Exception:
+        repos = None
+    if not isinstance(repos, dict) or not repos:
+        return
 
-    # If we have resolution summary, show auto-resolved commits organized by repo
-    if resolution_summary and resolution_summary.resolved_commits_by_repo:
-        console.print("\n📦 **Auto-Resolved Submodule Commits by Repository:**")
+    console.print("\n📦 **Auto-Resolved Submodule Commits by Repository:**")
 
-        # Create table for auto-resolved commits
-        table = Table(show_header=True, header_style="bold magenta")
-        table.add_column("Repository", style="cyan")
-        table.add_column("Submodule", style="yellow")
-        table.add_column("Old Hash", style="red")
-        table.add_column("New Hash", style="green")
-        table.add_column("Message", style="dim")
-        table.add_column("Status", style="blue")
+    # Create table for auto-resolved commits
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Repository", style="cyan")
+    table.add_column("Submodule", style="yellow")
+    table.add_column("Old Hash", style="red")
+    table.add_column("New Hash", style="green")
+    table.add_column("Message", style="dim")
+    table.add_column("Status", style="blue")
 
-        # Sort repositories by name for consistent display
-        for repo_name in sorted(resolution_summary.resolved_commits_by_repo.keys()):
-            commits = resolution_summary.resolved_commits_by_repo[repo_name]
-            if not commits:
-                continue
+    # Sort repositories by name for consistent display
+    for repo_name in sorted(repos.keys()):
+        commits = repos.get(repo_name) or []
+        try:
+            iterator = list(commits)
+        except Exception:
+            continue
 
-            for i, commit in enumerate(commits):
-                # Only show repo name for first commit of each repo
-                repo_display = repo_name if i == 0 else ""
+        for i, commit in enumerate(iterator):
+            # Only show repo name for first commit of each repo
+            repo_display = repo_name if i == 0 else ""
 
-                # Check if this commit has message consistency issues
-                status = "✅ OK"
-                for issue in resolution_summary.message_consistency_issues:
+            # Check if this commit has message consistency issues
+            status = "✅ OK"
+            try:
+                issues = getattr(resolution_summary, "message_consistency_issues", []) or []
+            except Exception:
+                issues = []
+            for issue in issues:
+                try:
                     if f"{repo_name}/{commit.submodule_path}" in issue:
                         status = "⚠️ Message Mismatch"
                         break
+                except Exception:
+                    # If commit object doesn't have expected attrs, skip mismatch check
+                    pass
 
-                table.add_row(
-                    repo_display,
-                    commit.submodule_path,
-                    commit.original_hash[:8],
-                    commit.resolved_hash[:8],
-                    commit.message,
-                    status,
-                )
+            try:
+                old_hash = commit.original_hash[:8]
+                new_hash = commit.resolved_hash[:8]
+                message = commit.message
+                submodule = commit.submodule_path
+            except Exception:
+                # If commit doesn't have expected attributes, skip rendering this row
+                continue
 
-        console.print(table)
+            table.add_row(
+                repo_display,
+                submodule,
+                old_hash,
+                new_hash,
+                message,
+                status,
+            )
 
-        # Show message consistency issues if any
-        if resolution_summary.message_consistency_issues:
-            console.print("\n⚠️  **Message Consistency Issues:**", style="bold yellow")
-            for issue in resolution_summary.message_consistency_issues:
-                console.print(f"   • {issue}")
+    console.print(table)
 
 
 def main() -> None:
