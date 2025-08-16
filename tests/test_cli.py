@@ -63,6 +63,7 @@ class TestCLI:
         mock_orchestrator = Mock()
         mock_orchestrator.validate_repository_state.return_value = []
         mock_operation = Mock()
+        mock_operation.backup_branches = {}
         mock_orchestrator.plan_rebase.return_value = mock_operation
         mock_orchestrator_class.return_value = mock_orchestrator
         
@@ -89,7 +90,8 @@ class TestCLI:
         mock_orchestrator.validate_repository_state.return_value = []
         mock_operation = Mock()
         mock_operation.repo_states = []
-        mock_orchestrator.plan_rebase.return_value = mock_operation
+        mock_operation.backup_branches = {}
+        mock_orchestrator.plan_rebase_auto.return_value = mock_operation
         mock_orchestrator_class.return_value = mock_orchestrator
         
         result = self.runner.invoke(cli, ['rebase', 'feature/test', 'main', '--dry-run'])
@@ -107,8 +109,8 @@ class TestCLI:
         mock_orchestrator.validate_repository_state.return_value = []
         mock_operation = Mock()
         mock_operation.repo_states = []
-        mock_operation.global_commit_mapping = {}
-        mock_orchestrator.plan_rebase.return_value = mock_operation
+        mock_operation.backup_branches = {}
+        mock_orchestrator.plan_rebase_auto.return_value = mock_operation
         mock_orchestrator.execute_rebase.return_value = True
         mock_orchestrator_class.return_value = mock_orchestrator
         
@@ -126,7 +128,8 @@ class TestCLI:
         mock_orchestrator.validate_repository_state.return_value = []
         mock_operation = Mock()
         mock_operation.repo_states = []
-        mock_orchestrator.plan_rebase.return_value = mock_operation
+        mock_operation.backup_branches = {}
+        mock_orchestrator.plan_rebase_auto.return_value = mock_operation
         mock_orchestrator_class.return_value = mock_orchestrator
         
         result = self.runner.invoke(cli, ['rebase', 'feature/test', 'main'])
@@ -141,7 +144,8 @@ class TestCLI:
         mock_orchestrator.validate_repository_state.return_value = ['Test warning']
         mock_operation = Mock()
         mock_operation.repo_states = []
-        mock_orchestrator.plan_rebase.return_value = mock_operation
+        mock_operation.backup_branches = {}
+        mock_orchestrator.plan_rebase_auto.return_value = mock_operation
         mock_orchestrator_class.return_value = mock_orchestrator
         
         result = self.runner.invoke(cli, ['rebase', 'feature/test', 'main', '--force', '--dry-run'])
@@ -169,7 +173,8 @@ class TestCLI:
         mock_orchestrator.validate_repository_state.return_value = []
         mock_operation = Mock()
         mock_operation.repo_states = []
-        mock_orchestrator.plan_rebase.return_value = mock_operation
+        mock_operation.backup_branches = {}
+        mock_orchestrator.plan_rebase_auto.return_value = mock_operation
         mock_orchestrator_class.return_value = mock_orchestrator
 
         result = self.runner.invoke(
@@ -178,13 +183,13 @@ class TestCLI:
         )
         assert result.exit_code == 0
 
-        # Check call kwargs
-        assert mock_orchestrator.plan_rebase.called
-        _, kwargs = mock_orchestrator.plan_rebase.call_args
+        # Check call kwargs (auto-planning by default)
+        assert mock_orchestrator.plan_rebase_auto.called
+        _, kwargs = mock_orchestrator.plan_rebase_auto.call_args
         assert kwargs.get('include') == {'libA'}
         assert kwargs.get('exclude') == {'libB'}
-        # branch_map omitted -> None
-        assert kwargs.get('branch_map') is None
+        # branch_map omitted -> None (overrides param in auto)
+        assert kwargs.get('branch_map_overrides') is None
 
     @patch('lockstep_rebase.cli.RebaseOrchestrator')
     def test_rebase_with_branch_map_forwarded(self, mock_orchestrator_class):
@@ -193,7 +198,8 @@ class TestCLI:
         mock_orchestrator.validate_repository_state.return_value = []
         mock_operation = Mock()
         mock_operation.repo_states = []
-        mock_orchestrator.plan_rebase.return_value = mock_operation
+        mock_operation.backup_branches = {}
+        mock_orchestrator.plan_rebase_auto.return_value = mock_operation
         mock_orchestrator_class.return_value = mock_orchestrator
 
         result = self.runner.invoke(
@@ -206,9 +212,9 @@ class TestCLI:
         )
         assert result.exit_code == 0
 
-        _, kwargs = mock_orchestrator.plan_rebase.call_args
+        _, kwargs = mock_orchestrator.plan_rebase_auto.call_args
         expected = {
             'libA': ('feat/x', 'main'),
             'libs/libB': ('feat/y', None),
         }
-        assert kwargs.get('branch_map') == expected
+        assert kwargs.get('branch_map_overrides') == expected

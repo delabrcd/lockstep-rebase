@@ -21,11 +21,10 @@ class ConflictResolver:
     """Handles merge conflict resolution during rebase operations."""
 
     def __init__(
-        self, global_tracker: GlobalCommitTracker, git_manager: GitManager, conflict_prompt: ConflictPrompt = None
+        self, global_tracker: GlobalCommitTracker, conflict_prompt: ConflictPrompt = None
     ) -> None:
-        """Initialize conflict resolver with global commit tracker and GitManager."""
+        """Initialize conflict resolver with global commit tracker."""
         self.global_tracker = global_tracker
-        self.git_manager = git_manager
         self.resolution_summary = ResolutionSummary()
         self.conflict_prompt = conflict_prompt or NoOpConflictPrompt()
 
@@ -39,11 +38,12 @@ class ConflictResolver:
         conflicts = {"file_conflicts": [], "submodule_conflicts": []}
 
         try:
-            # Use GitManager to get unresolved merge paths
-            unresolved_paths = self.git_manager.get_conflict_files(repo_path)
+            # Use a per-repo GitManager to get unresolved merge paths
+            gm = GitManager(repo_path)
+            unresolved_paths = gm.get_conflict_files()
 
             for filepath in unresolved_paths:
-                if self.git_manager.is_submodule_path(repo_path, filepath):
+                if gm.is_submodule_path(filepath):
                     conflicts["submodule_conflicts"].append(filepath)
                 else:
                     conflicts["file_conflicts"].append(filepath)
@@ -62,7 +62,8 @@ class ConflictResolver:
     def _is_submodule_path(self, repo_path: Path, filepath: str) -> bool:
         """Deprecated: kept for backward-compat; delegates to GitManager."""
         try:
-            return self.git_manager.is_submodule_path(repo_path, filepath)
+            gm = GitManager(repo_path)
+            return gm.is_submodule_path(filepath)
         except Exception as e:
             logger.debug(f"Error checking submodule path via GitManager: {e}")
             return False
@@ -102,7 +103,8 @@ class ConflictResolver:
         """
         try:
             # Get the conflicted submodule index entries via GitManager
-            entries = self.git_manager.get_unmerged_index_entries(repo_path, submodule_path)
+            gm_parent = GitManager(repo_path)
+            entries = gm_parent.get_unmerged_index_entries(submodule_path)
             if not entries:
                 return False
 
@@ -125,10 +127,11 @@ class ConflictResolver:
 
             # Update the submodule to the resolved hash
             submodule_full_path = repo_path / submodule_path
-            self.git_manager.checkout_commit(resolved_hash, submodule_full_path)
+            gm_sub = GitManager(submodule_full_path)
+            gm_sub.checkout_commit(resolved_hash)
 
             # Stage the resolved submodule in parent repo
-            self.git_manager.add_paths([submodule_path], repo_path)
+            gm_parent.add_paths([submodule_path])
 
             # Get commit messages for tracking via GitManager
             original_message = self._get_commit_message(submodule_full_path, incoming_hash)
@@ -173,7 +176,8 @@ class ConflictResolver:
     def _get_commit_message(self, repo_path: Path, commit_hash: str) -> Optional[str]:
         """Get the commit message for a given commit hash via GitManager."""
         try:
-            return self.git_manager.get_commit_subject(commit_hash, repo_path)
+            gm = GitManager(repo_path)
+            return gm.get_commit_subject(commit_hash)
         except Exception as e:
             logger.debug(f"Could not get commit message for {commit_hash[:8]}: {e}")
             return None
@@ -261,8 +265,9 @@ class ConflictResolver:
             contains user-facing guidance strings suitable for CLI display.
         """
         try:
+            gm = GitManager(repo_path)
             # Check for unmerged files via GitManager
-            unresolved_files = self.git_manager.get_conflict_files(repo_path)
+            unresolved_files = gm.get_conflict_files()
 
             if unresolved_files:
                 return False, [
@@ -270,7 +275,7 @@ class ConflictResolver:
                 ]
 
             # Check that changes are staged via GitManager
-            staged_files = self.git_manager.get_staged_files(repo_path)
+            staged_files = gm.get_staged_files()
 
             if not staged_files:
                 return False, [
@@ -290,7 +295,8 @@ class ConflictResolver:
     def stage_resolved_conflicts(self, repo_path: Path, resolved_files: List[str]) -> None:
         """Stage resolved conflict files using GitManager."""
         try:
-            self.git_manager.add_paths(resolved_files, repo_path)
+            gm = GitManager(repo_path)
+            gm.add_paths(resolved_files)
             logger.info(f"Staged {len(resolved_files)} resolved files")
         except Exception as e:
             logger.error(f"Error staging resolved files: {e}")
@@ -299,6 +305,7 @@ class ConflictResolver:
     def has_unstaged_changes(self, repo_path: Path) -> bool:
         """Check if repository has unstaged changes via GitManager."""
         try:
-            return self.git_manager.has_unstaged_changes(repo_path)
+            gm = GitManager(repo_path)
+            return gm.has_unstaged_changes()
         except Exception:
             return False

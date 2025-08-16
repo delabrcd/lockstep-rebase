@@ -33,12 +33,18 @@ class RebaseOrchestrator:
         self.git_manager = GitManager(self.root_path)
         self.submodule_mapper = SubmoduleMapper(self.root_path)
         self.global_tracker = GlobalCommitTracker()
-        self.conflict_resolver = ConflictResolver(self.global_tracker, self.git_manager, conflict_prompt)
+        self.conflict_resolver = ConflictResolver(
+            self.global_tracker, conflict_prompt
+        )
         self.backup_manager = BackupManager()
 
         # Discover repository hierarchy
         self.root_repo_info = self.submodule_mapper.discover_repository_hierarchy()
         logger.info(f"Initialized rebase orchestrator for {self.root_repo_info.name}")
+
+        # Initialize GitManager cache and populate from discovered hierarchy
+        self._git_manager_cache: Dict[Path, GitManager] = {self.root_path: self.git_manager}
+        self._init_git_manager_cache()
 
     def plan_rebase(
         self,
@@ -76,7 +82,11 @@ class RebaseOrchestrator:
 
         # Filter include/exclude
         def _matches(repo: RepoInfo, token: str) -> bool:
-            rel = str(repo.path.relative_to(self.root_path)) if self.root_path in repo.path.parents or repo.path == self.root_path else str(repo.path)
+            rel = (
+                str(repo.path.relative_to(self.root_path))
+                if self.root_path in repo.path.parents or repo.path == self.root_path
+                else str(repo.path)
+            )
             return token == repo.name or token == rel or token == str(repo.path)
 
         if include:
@@ -94,17 +104,26 @@ class RebaseOrchestrator:
         # Fetch remotes for all selected repositories up front (including submodules)
         for repo_info in selected:
             try:
-                gm = GitManager(repo_info.path)
-                gm.fetch_remote("origin", repo_info.path)
+                gm = self._get_gm(repo_info.path)
+                remotes = [r.name for r in gm.repo.remotes]
+                for rn in remotes:
+                    try:
+                        gm.fetch_remote(rn)
+                    except Exception as fe:
+                        logger.warning(f"Failed to fetch {rn} for {repo_info.name}: {fe}")
             except Exception as e:
-                logger.warning(f"Failed to fetch origin for {repo_info.name}: {e}")
+                logger.warning(f"Failed to list/fetch remotes for {repo_info.name}: {e}")
 
         # Per-repo branch resolve using branch_map overrides
         def _resolve_branches(repo: RepoInfo) -> tuple[str, str]:
             if not branch_map:
                 return source_branch, target_branch
             # Priority: name, relative path, absolute path
-            rel = str(repo.path.relative_to(self.root_path)) if self.root_path in repo.path.parents or repo.path == self.root_path else str(repo.path)
+            rel = (
+                str(repo.path.relative_to(self.root_path))
+                if self.root_path in repo.path.parents or repo.path == self.root_path
+                else str(repo.path)
+            )
             keys = [repo.name, rel, str(repo.path)]
             for k in keys:
                 if k in branch_map:
@@ -117,15 +136,26 @@ class RebaseOrchestrator:
         missing_tgt: list[str] = []
 
         for repo_info in selected:
-            gm = GitManager(repo_info.path)
+            gm = self._get_gm(repo_info.path)
             src_br, tgt_br = _resolve_branches(repo_info)
 
             # Ensure source branch exists locally; if only remote exists, offer to create
-            if not gm.branch_exists(src_br, repo_info.path):
-                if gm.remote_branch_exists(src_br, "origin", repo_info.path):
+            if not gm.branch_exists(src_br):
+                chosen_remote = None
+                try:
+                    remotes = [r.name for r in gm.repo.remotes]
+                except Exception:
+                    remotes = []
+                for rn in sorted(remotes, key=lambda n: (n != "origin", n)):
+                    if gm.remote_branch_exists(src_br, rn):
+                        chosen_remote = rn
+                        break
+                if chosen_remote:
                     try:
-                        if prompt.confirm_create_local_branch(repo_info.name, src_br, "origin"):
-                            gm.create_local_branch_from_remote(src_br, "origin", repo_info.path)
+                        if prompt.confirm_create_local_branch(
+                            repo_info.name, src_br, chosen_remote
+                        ):
+                            gm.create_local_branch_from_remote(src_br, chosen_remote)
                         else:
                             missing_src.append(f"{repo_info.name} ({src_br})")
                     except Exception:
@@ -134,11 +164,22 @@ class RebaseOrchestrator:
                     missing_src.append(f"{repo_info.name} ({src_br})")
 
             # Ensure target branch exists locally; if only remote exists, offer to create
-            if not gm.branch_exists(tgt_br, repo_info.path):
-                if gm.remote_branch_exists(tgt_br, "origin", repo_info.path):
+            if not gm.branch_exists(tgt_br):
+                chosen_remote = None
+                try:
+                    remotes = [r.name for r in gm.repo.remotes]
+                except Exception:
+                    remotes = []
+                for rn in sorted(remotes, key=lambda n: (n != "origin", n)):
+                    if gm.remote_branch_exists(tgt_br, rn):
+                        chosen_remote = rn
+                        break
+                if chosen_remote:
                     try:
-                        if prompt.confirm_create_local_branch(repo_info.name, tgt_br, "origin"):
-                            gm.create_local_branch_from_remote(tgt_br, "origin", repo_info.path)
+                        if prompt.confirm_create_local_branch(
+                            repo_info.name, tgt_br, chosen_remote
+                        ):
+                            gm.create_local_branch_from_remote(tgt_br, chosen_remote)
                         else:
                             missing_tgt.append(f"{repo_info.name} ({tgt_br})")
                     except Exception:
@@ -149,17 +190,30 @@ class RebaseOrchestrator:
             # Remote sync: prompt user instead of auto fast-forwarding (only if enabled here)
             if do_sync_prompt:
                 try:
+
                     def _maybe_prompt_sync(branch: str) -> None:
-                        # Only consider if remote exists and local exists
-                        if not gm.branch_exists(branch, repo_info.path):
+                        # Only consider if local exists and there is some remote with the branch
+                        if not gm.branch_exists(branch):
                             return
-                        if not gm.remote_branch_exists(branch, "origin", repo_info.path):
+                        try:
+                            remotes = [r.name for r in gm.repo.remotes]
+                        except Exception:
+                            remotes = []
+                        chosen_remote = None
+                        for rn in sorted(remotes, key=lambda n: (n != "origin", n)):
+                            if gm.remote_branch_exists(branch, rn):
+                                chosen_remote = rn
+                                break
+                        if not chosen_remote:
                             return
-                        ahead, behind = gm.branch_ahead_behind(branch, "origin", repo_info.path)
+                        ahead, behind = gm.branch_ahead_behind(branch, chosen_remote)
                         if ahead == 0 and behind == 0:
                             return
-                        local_commit = gm.get_short_commit_for_ref(branch, repo_info.path) or ""
-                        remote_commit = gm.get_short_commit_for_ref(f"origin/{branch}", repo_info.path) or ""
+                        local_commit = gm.get_short_commit_for_ref(branch) or ""
+                        remote_commit = (
+                            gm.get_short_commit_for_ref(f"{chosen_remote}/{branch}")
+                            or ""
+                        )
                         action = prompt.confirm_sync_branch(
                             repo_info.name,
                             branch,
@@ -171,23 +225,25 @@ class RebaseOrchestrator:
                         if action == BranchSyncAction.SYNC_LOCAL:
                             if behind > 0 and ahead == 0:
                                 logger.info(
-                                    f"User approved fast-forward of {repo_info.name}:{branch} (behind {behind})"
+                                    f"User approved fast-forward of {repo_info.name}:{branch} from {chosen_remote} (behind {behind})"
                                 )
-                                gm.fast_forward_branch_to_remote(branch, "origin", repo_info.path)
+                                gm.fast_forward_branch_to_remote(branch, chosen_remote)
                             else:
                                 logger.warning(
                                     f"Cannot fast-forward {repo_info.name}:{branch} due to divergence (ahead {ahead}, behind {behind}); skipping"
                                 )
                         elif action == BranchSyncAction.USE_REMOTE:
                             logger.info(
-                                f"User chose to reset {repo_info.name}:{branch} to origin/{branch} ({remote_commit})"
+                                f"User chose to reset {repo_info.name}:{branch} to {chosen_remote}/{branch} ({remote_commit})"
                             )
                             # Force update local branch to remote tip
-                            gm.create_local_branch_from_remote(branch, "origin", repo_info.path)
+                            gm.create_local_branch_from_remote(branch, chosen_remote)
                         elif action == BranchSyncAction.SKIP:
                             logger.info(f"User skipped syncing {repo_info.name}:{branch}")
                         elif action == BranchSyncAction.ABORT:
-                            raise RebaseError(f"User aborted during sync of {repo_info.name}:{branch}")
+                            raise RebaseError(
+                                f"User aborted during sync of {repo_info.name}:{branch}"
+                            )
                         # CREATE_LOCAL is not applicable here since the branch exists locally
 
                     _maybe_prompt_sync(src_br)
@@ -198,20 +254,16 @@ class RebaseOrchestrator:
                     )
 
         if missing_src:
-            raise RebaseError(
-                "Source branch missing in: " + ", ".join(missing_src)
-            )
+            raise RebaseError("Source branch missing in: " + ", ".join(missing_src))
         if missing_tgt:
-            raise RebaseError(
-                "Target branch missing in: " + ", ".join(missing_tgt)
-            )
+            raise RebaseError("Target branch missing in: " + ", ".join(missing_tgt))
 
         # Build rebase states
         for repo_info in selected:
-            gm = GitManager(repo_info.path)
+            gm = self._get_gm(repo_info.path)
             src_br, tgt_br = _resolve_branches(repo_info)
 
-            original_commits = gm.get_commits_between(tgt_br, src_br, repo_info.path)
+            original_commits = gm.get_commits_between(tgt_br, src_br)
 
             state = RebaseState(
                 repo=repo_info,
@@ -251,9 +303,7 @@ class RebaseOrchestrator:
             exclude: Optional user exclude filters (name/relative/absolute)
             branch_map_overrides: Optional per-repo overrides to apply on top of discovery
         """
-        logger.info(
-            f"Planning auto-discovery rebase from {source_branch} to {target_branch}"
-        )
+        logger.info(f"Planning auto-discovery rebase from {source_branch} to {target_branch}")
 
         if prompt is None:
             prompt = NoOpPrompt()
@@ -278,16 +328,53 @@ class RebaseOrchestrator:
             discovered_includes.add(rel_key)
 
         def infer_branches_for_submodule(
-            sub_repo: RepoInfo, src_sha: Optional[str], tgt_sha: Optional[str],
-            parent_src: str, parent_tgt: str,
+            sub_repo: RepoInfo,
+            src_sha: Optional[str],
+            tgt_sha: Optional[str],
+            parent_src: str,
+            parent_tgt: str,
         ) -> Tuple[str, str]:
-            """Infer default (src, tgt) branches inside submodule from pointers and fallbacks."""
-            gm_sub = GitManager(sub_repo.path)
+            """Infer default (src, tgt) branches inside submodule using ONLY exact tip matches.
 
-            def pick(commit_sha: Optional[str], fallback: str) -> str:
+            If no exact match exists for a pointer, return an empty string to force manual input.
+            Preference: if the parent's branch name exists in the submodule and is an exact match, use it.
+            Otherwise, pick any branch (local or remote) whose tip equals the pointer commit.
+            """
+            gm_sub = self._get_gm(sub_repo.path)
+
+            def pick(commit_sha: Optional[str], prefer: str) -> str:
                 if not commit_sha:
-                    return fallback
-                locals_, remotes_ = gm_sub.branches_containing_commit(commit_sha, sub_repo.path)
+                    return ""
+
+                short_commit = gm_sub.get_short_commit_for_ref(commit_sha)
+                if not short_commit:
+                    return ""
+
+                # Prefer the hinted parent branch name if it exactly matches the pointer
+                try:
+                    if gm_sub.branch_exists(prefer):
+                        head = gm_sub.get_short_commit_for_ref(prefer)
+                        if head == short_commit:
+                            return prefer
+                    # Check across any remote
+                    try:
+                        for r in gm_sub.repo.remotes:
+                            if gm_sub.remote_branch_exists(prefer, r.name):
+                                head = gm_sub.get_short_commit_for_ref(
+                                    f"{r.name}/{prefer}"
+                                )
+                                if head == short_commit:
+                                    return prefer
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+                # Discover other exact matches via branches_containing_commit, but filter by exact tip equality
+                try:
+                    locals_, remotes_ = gm_sub.branches_containing_commit(commit_sha)
+                except Exception:
+                    locals_, remotes_ = ([], [])
 
                 def _sanitize_local(names: List[str]) -> List[str]:
                     out: List[str] = []
@@ -295,13 +382,16 @@ class RebaseOrchestrator:
                         if not n:
                             continue
                         low = n.lower()
-                        # Ignore detached HEAD annotations or symbolic pointers
-                        if n.startswith("(") or "detached" in low or low.startswith("head") or "->" in n:
+                        if (
+                            n.startswith("(")
+                            or "detached" in low
+                            or low.startswith("head")
+                            or "->" in n
+                        ):
                             continue
                         out.append(n)
-                    # Keep only real heads present locally
                     try:
-                        return [b for b in out if gm_sub.branch_exists(b, sub_repo.path)]
+                        return [b for b in out if gm_sub.branch_exists(b)]
                     except Exception:
                         return out
 
@@ -311,40 +401,30 @@ class RebaseOrchestrator:
                         if not n:
                             continue
                         if "->" in n:
-                            # Skip symbolic refs like 'origin/HEAD -> origin/main'
                             continue
                         out.append(n)
                     return out
 
-                locals_s = _sanitize_local(locals_)
-                # Prefer a local branch containing the commit
-                if locals_s:
-                    if fallback in locals_s:
-                        return fallback
-                    return locals_s[0]
-
-                # Otherwise pick a remote branch and strip remote prefix
-                remotes_s = _sanitize_remote(remotes_)
-                if remotes_s:
-                    name = remotes_s[0]
-                    if "/" in name:
-                        name = name.split("/", 1)[1]
-                    return name
-                # As a last resort, only use fallback if it actually exists
-                try:
-                    if gm_sub.branch_exists(fallback, sub_repo.path):
-                        return fallback
-                    # Prefer common default branches
-                    for cand in ["main", "master", "develop"]:
-                        if gm_sub.branch_exists(cand, sub_repo.path):
+                for cand in _sanitize_local(locals_):
+                    try:
+                        head = gm_sub.get_short_commit_for_ref(cand)
+                        if head == short_commit:
                             return cand
-                    # Otherwise, pick any local branch to allow planning to proceed
-                    any_locals = gm_sub.list_local_branches(sub_repo.path)
-                    if any_locals:
-                        return any_locals[0]
-                except Exception:
-                    pass
-                return fallback
+                    except Exception:
+                        continue
+
+                for cand in _sanitize_remote(remotes_):
+                    # cand is like 'remote/name'; compare using full ref and return short branch name
+                    name = cand.split("/", 1)[1] if "/" in cand else cand
+                    try:
+                        head = gm_sub.get_short_commit_for_ref(cand)
+                        if head == short_commit:
+                            return name
+                    except Exception:
+                        continue
+
+                # No exact matches found
+                return ""
 
             default_src = pick(src_sha, parent_src)
             default_tgt = pick(tgt_sha, parent_tgt)
@@ -352,37 +432,39 @@ class RebaseOrchestrator:
 
         def process_parent(parent_info: RepoInfo, parent_src: str, parent_tgt: str) -> None:
             # Always include the parent repo itself
-            gm_parent = GitManager(parent_info.path)
+            gm_parent = self._get_gm(parent_info.path)
 
             # Always fetch before checking sync or reading pointers
             try:
-                gm_parent.fetch_remote("origin", parent_info.path)
+                gm_parent.fetch_remote("origin")
             except Exception as e:
                 logger.warning(f"Failed to fetch origin for {parent_info.name}: {e}")
 
             # Optionally prompt to sync parent's branches
             def _maybe_prompt_sync(branch: str) -> None:
-                if not gm_parent.branch_exists(branch, parent_info.path):
+                if not gm_parent.branch_exists(branch):
                     return
-                if not gm_parent.remote_branch_exists(branch, "origin", parent_info.path):
+                if not gm_parent.remote_branch_exists(branch, "origin"):
                     return
-                ahead, behind = gm_parent.branch_ahead_behind(branch, "origin", parent_info.path)
+                ahead, behind = gm_parent.branch_ahead_behind(branch, "origin")
                 if ahead == 0 and behind == 0:
                     return
-                local_commit = gm_parent.get_short_commit_for_ref(branch, parent_info.path) or ""
-                remote_commit = gm_parent.get_short_commit_for_ref(f"origin/{branch}", parent_info.path) or ""
+                local_commit = gm_parent.get_short_commit_for_ref(branch) or ""
+                remote_commit = (
+                    gm_parent.get_short_commit_for_ref(f"origin/{branch}") or ""
+                )
                 action = prompt.confirm_sync_branch(
                     parent_info.name, branch, local_commit, remote_commit, behind, ahead
                 )
                 if action == BranchSyncAction.SYNC_LOCAL:
                     if behind > 0 and ahead == 0:
-                        gm_parent.fast_forward_branch_to_remote(branch, "origin", parent_info.path)
+                        gm_parent.fast_forward_branch_to_remote(branch, "origin")
                     else:
                         logger.warning(
                             f"Cannot fast-forward {parent_info.name}:{branch} due to divergence (ahead {ahead}, behind {behind}); skipping"
                         )
                 elif action == BranchSyncAction.USE_REMOTE:
-                    gm_parent.create_local_branch_from_remote(branch, "origin", parent_info.path)
+                    gm_parent.create_local_branch_from_remote(branch, "origin")
                 elif action == BranchSyncAction.SKIP:
                     pass
                 elif action == BranchSyncAction.ABORT:
@@ -392,13 +474,15 @@ class RebaseOrchestrator:
                 _maybe_prompt_sync(parent_src)
                 _maybe_prompt_sync(parent_tgt)
             except Exception as e:
-                logger.warning(f"Remote sync prompt in auto-planning failed for {parent_info.name}: {e}")
+                logger.warning(
+                    f"Remote sync prompt in auto-planning failed for {parent_info.name}: {e}"
+                )
 
             # Resolve refs for reading pointers (use remote ref if local branch missing)
             def _ref_for_reading(branch: str) -> str:
-                if gm_parent.branch_exists(branch, parent_info.path):
+                if gm_parent.branch_exists(branch):
                     return branch
-                if gm_parent.remote_branch_exists(branch, "origin", parent_info.path):
+                if gm_parent.remote_branch_exists(branch, "origin"):
                     return f"origin/{branch}"
                 return branch
 
@@ -411,41 +495,123 @@ class RebaseOrchestrator:
                 except Exception:
                     rel_path = sm.name
 
-                # Detect if the submodule pointer changed in the parent between target..source
-                changed = gm_parent.submodule_changed_between(
-                    tgt_ref, src_ref, rel_path, parent_info.path
-                )
-                if not changed:
+                # Detect if submodule changed on both branches (relative to merge-base) to annotate suggestions.
+                # We avoid a second prompt here to keep UX to a single include prompt.
+                both_changed = False
+                base_sha = gm_parent.repo.git.merge_base(src_ref, tgt_ref)
+                if base_sha:
+                    both_changed = bool(
+                        gm_parent.submodule_changed_between(
+                            base_sha, src_ref, rel_path
+                        )
+                        and gm_parent.submodule_changed_between(
+                            base_sha, tgt_ref, rel_path
+                        )
+                    )
+
+                # Consider updated when the submodule pointer changed between target..source
+                if not both_changed:
                     continue
 
                 # Include this parent since it has a changed submodule pointer
                 record_repo(parent_info)
 
                 # Get the pointers at each end for context and inference
-                src_sha = gm_parent.get_submodule_pointer_at(src_ref, rel_path, parent_info.path)
-                tgt_sha = gm_parent.get_submodule_pointer_at(tgt_ref, rel_path, parent_info.path)
+                src_sha = gm_parent.get_submodule_pointer_at(src_ref, rel_path)
+                tgt_sha = gm_parent.get_submodule_pointer_at(tgt_ref, rel_path)
 
                 # Infer suggested branches for the submodule
                 sugg_src, sugg_tgt = infer_branches_for_submodule(
                     sm, src_sha, tgt_sha, parent_src, parent_tgt
                 )
 
-                # Prompt for inclusion
+                # Git manager for this submodule (used by helpers below)
+                gm_sub = self._get_gm(sm.path)
+
+                # Compute display variants without stripping remote prefix for user clarity
+                def _to_display(branch_name: str) -> str:
+                    try:
+                        # Prefer showing remote-qualified name if any remote has it (prefer 'origin')
+                        remotes = [r.name for r in gm_sub.repo.remotes]
+                        for rn in sorted(remotes, key=lambda n: (n != "origin", n)):
+                            if gm_sub.remote_branch_exists(branch_name, rn):
+                                return f"{rn}/{branch_name}"
+                        if gm_sub.branch_exists(branch_name):
+                            return branch_name
+                    except Exception:
+                        pass
+                    return branch_name
+                def _is_exact(branch_name: str, commit_sha: Optional[str]) -> bool:
+                    if not commit_sha:
+                        return False
+                    try:
+                        short_commit = gm_sub.get_short_commit_for_ref(commit_sha)
+                        if not short_commit:
+                            return False
+                        if gm_sub.branch_exists(branch_name):
+                            head_short = gm_sub.get_short_commit_for_ref(branch_name)
+                            if head_short == short_commit:
+                                return True
+                        remotes = [r.name for r in gm_sub.repo.remotes]
+                        for rn in remotes:
+                            if gm_sub.remote_branch_exists(branch_name, rn):
+                                head_short = gm_sub.get_short_commit_for_ref(
+                                    f"{rn}/{branch_name}"
+                                )
+                                if head_short == short_commit:
+                                    return True
+                        return False
+                    except Exception:
+                        return False
+
+                src_exact = _is_exact(sugg_src, src_sha)
+                tgt_exact = _is_exact(sugg_tgt, tgt_sha)
+                display_src = _to_display(sugg_src) if src_exact else "no exact tracking branch"
+                display_tgt = _to_display(sugg_tgt) if tgt_exact else "no exact tracking branch"
+
+                # Prompt for inclusion (present display suggestions with remote prefixes preserved)
                 include_sm = prompt.confirm_include_updated_submodule(
                     parent_info.name,
                     rel_path,
                     src_sha or "",
                     tgt_sha or "",
-                    sugg_src,
-                    sugg_tgt,
+                    display_src,
+                    display_tgt,
                 )
+
                 if not include_sm:
                     continue
 
-                # Allow override of inferred branches
+                # Allow override of inferred branches.
+                # Only suggest defaults when there is an exact tracking branch; otherwise force manual input.
+                default_src_for_input = sugg_src if src_exact else ""
+                default_tgt_for_input = sugg_tgt if tgt_exact else ""
                 chosen_src, chosen_tgt = prompt.choose_submodule_branches(
-                    sm.name, sugg_src, sugg_tgt
+                    sm.name, default_src_for_input, default_tgt_for_input
                 )
+
+                # Ensure local branches exist (tool operates on local branches). If only remote exists, offer to create local.
+                try:
+                    for chosen in (chosen_src, chosen_tgt):
+                        if gm_sub.branch_exists(chosen):
+                            continue
+                        # Find a remote that has this branch (prefer 'origin')
+                        chosen_remote: Optional[str] = None
+                        try:
+                            remotes = [r.name for r in gm_sub.repo.remotes]
+                        except Exception:
+                            remotes = []
+                        for rn in sorted(remotes, key=lambda n: (n != "origin", n)):
+                            if gm_sub.remote_branch_exists(chosen, rn):
+                                chosen_remote = rn
+                                break
+                        if chosen_remote:
+                            if prompt.confirm_create_local_branch(sm.name, chosen, chosen_remote):
+                                gm_sub.create_local_branch_from_remote(
+                                    chosen, chosen_remote
+                                )
+                except Exception as e:
+                    logger.warning(f"Failed ensuring local branch exists for {sm.name}: {e}")
 
                 # Record mapping and inclusion using robust key (relative to overall root)
                 _, rel_key, abs_key = repo_key_variants(sm.path)
@@ -467,8 +633,10 @@ class RebaseOrchestrator:
 
         # Determine the include filter to pass to planner
         # If user provided explicit includes, prefer that; otherwise use discovered set
-        include_filter: Optional[Set[str]] = include if (include and len(include) > 0) else (
-            discovered_includes if discovered_includes else None
+        include_filter: Optional[Set[str]] = (
+            include
+            if (include and len(include) > 0)
+            else (discovered_includes if discovered_includes else None)
         )
 
         # Apply excludes by passing through to planner (it will apply matching)
@@ -482,9 +650,7 @@ class RebaseOrchestrator:
             do_sync_prompt=False,
         )
 
-        logger.info(
-            f"Auto-discovery planned {len(operation.repo_states)} repositories for rebase"
-        )
+        logger.info(f"Auto-discovery planned {len(operation.repo_states)} repositories for rebase")
         return operation
 
     def execute_rebase(self, operation: RebaseOperation) -> bool:
@@ -540,9 +706,7 @@ class RebaseOrchestrator:
                 logger.error(
                     f"Failed to create backup for {state.repo.name} ({state.source_branch}): {e}"
                 )
-                raise RebaseError(
-                    f"Failed to create backup branch in {state.repo.name}: {e}"
-                )
+                raise RebaseError(f"Failed to create backup branch in {state.repo.name}: {e}")
         logger.info(f"Created {created} backup branches for session {operation.backup_session_id}")
 
     def delete_backups(self, operation: RebaseOperation) -> int:
@@ -572,7 +736,9 @@ class RebaseOrchestrator:
         target = repo_path or self.root_path
         return self.backup_manager.list_parsed_backups(target, original_branch=original_branch)
 
-    def list_backups_across_hierarchy(self, original_branch: Optional[str] = None) -> List[BackupEntry]:
+    def list_backups_across_hierarchy(
+        self, original_branch: Optional[str] = None
+    ) -> List[BackupEntry]:
         """Aggregate structured backup entries across the repository hierarchy."""
         entries: List[BackupEntry] = []
         for repo_info in self._get_all_repositories(self.root_repo_info):
@@ -646,15 +812,15 @@ class RebaseOrchestrator:
         """Execute rebase for a single repository."""
         logger.info(f"🔄 Rebasing {state.repo.name} ({state.repo.relative_path})")
 
-        git_manager = GitManager(state.repo.path)
+        git_manager = self._get_gm(state.repo.path)
         repo_tracker = self.global_tracker.get_tracker(state.repo.name)
 
         try:
             # Checkout source branch
-            git_manager.checkout_branch(state.source_branch, state.repo.path)
+            git_manager.checkout_branch(state.source_branch)
 
             # Start rebase
-            success, conflict_files = git_manager.start_rebase(state.target_branch, state.repo.path)
+            success, conflict_files = git_manager.start_rebase(state.target_branch)
 
             if success:
                 # Rebase completed without conflicts
@@ -675,7 +841,7 @@ class RebaseOrchestrator:
         """Handle a rebase that completed without conflicts."""
         try:
             # Get updated commits
-            new_commits = git_manager.get_updated_commits(state.original_commits, state.repo.path)
+            new_commits = git_manager.get_updated_commits(state.original_commits)
 
             # Map old commits to new commits
             commit_mappings = repo_tracker.map_commits(state.original_commits, new_commits)
@@ -685,9 +851,9 @@ class RebaseOrchestrator:
             state.commit_mapping = commit_mappings
             state.is_completed = True
 
-            # Add to global mappings
-            for old_hash, new_hash in commit_mappings.items():
-                operation.add_commit_mapping(old_hash, new_hash)
+            # # Add to global mappings
+            # for old_hash, new_hash in commit_mappings.items():
+            #     operation.add_commit_mapping(old_hash, new_hash)
 
             logger.info(f"✅ Successfully rebased {state.repo.name}")
             return True
@@ -713,7 +879,7 @@ class RebaseOrchestrator:
 
             if not conflicts["file_conflicts"] and not conflicts["submodule_conflicts"]:
                 # No more conflicts, try to continue
-                success, new_conflicts = git_manager.continue_rebase(state.repo.path)
+                success, new_conflicts = git_manager.continue_rebase()
 
                 if success:
                     # Rebase completed
@@ -757,9 +923,9 @@ class RebaseOrchestrator:
 
         for state in operation.repo_states:
             try:
-                git_manager = GitManager(state.repo.path)
-                if git_manager.is_rebase_in_progress(state.repo.path):
-                    git_manager.abort_rebase(state.repo.path)
+                git_manager = self._get_gm(state.repo.path)
+                if git_manager.is_rebase_in_progress():
+                    git_manager.abort_rebase()
                     logger.info(f"Aborted rebase for {state.repo.name}")
             except Exception as e:
                 logger.error(f"Error cleaning up {state.repo.name}: {e}")
@@ -772,9 +938,9 @@ class RebaseOrchestrator:
 
         for repo_info in all_repos:
             try:
-                git_manager = GitManager(repo_info.path)
-                current_branch = git_manager.get_current_branch(repo_info.path)
-                is_rebasing = git_manager.is_rebase_in_progress(repo_info.path)
+                git_manager = self._get_gm(repo_info.path)
+                current_branch = git_manager.get_current_branch()
+                is_rebasing = git_manager.is_rebase_in_progress()
 
                 status[repo_info.name] = {
                     "path": str(repo_info.relative_path),
@@ -794,6 +960,24 @@ class RebaseOrchestrator:
         for submodule in root_info.submodules:
             all_repos.extend(self._get_all_repositories(submodule))
         return all_repos
+
+    def _init_git_manager_cache(self) -> None:
+        """Populate the GitManager cache for all discovered repositories."""
+        try:
+            for repo_info in self._get_all_repositories(self.root_repo_info):
+                if repo_info.path not in self._git_manager_cache:
+                    self._git_manager_cache[repo_info.path] = GitManager(repo_info.path)
+        except Exception:
+            # Be resilient; fall back to lazy population
+            pass
+
+    def _get_gm(self, repo_path: Path) -> GitManager:
+        """Get a cached GitManager for the repo path, creating if necessary."""
+        gm = self._git_manager_cache.get(repo_path)
+        if gm is None:
+            gm = GitManager(repo_path)
+            self._git_manager_cache[repo_path] = gm
+        return gm
 
     def get_repo_heirarchy(self) -> List[str]:
         """Return the discovered repository hierarchy as lines for CLI display."""
@@ -825,10 +1009,10 @@ class RebaseOrchestrator:
 
         for repo_info in all_repos:
             try:
-                git_manager = GitManager(repo_info.path)
+                git_manager = self._get_gm(repo_info.path)
 
                 # Check for ongoing rebase
-                if git_manager.is_rebase_in_progress(repo_info.path):
+                if git_manager.is_rebase_in_progress():
                     errors.append(f"{repo_info.name}: Rebase already in progress")
 
                 # Check for unstaged changes

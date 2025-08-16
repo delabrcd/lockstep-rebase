@@ -127,7 +127,6 @@ class TestRebaseOperation:
         assert operation.source_branch == "feature/test"
         assert operation.target_branch == "main"
         assert operation.repo_states == []
-        assert operation.global_commit_mapping == {}
     
     def test_get_state_for_repo(self):
         """Test getting state for a specific repository."""
@@ -150,18 +149,6 @@ class TestRebaseOperation:
         # Test not finding a state
         not_found = operation.get_state_for_repo(Path("/test/other"))
         assert not_found is None
-    
-    def test_add_commit_mapping(self):
-        """Test adding commit mappings."""
-        root_repo = RepoInfo(path=Path("/test/root"), name="root")
-        operation = RebaseOperation(
-            root_repo=root_repo,
-            source_branch="feature/test",
-            target_branch="main"
-        )
-        
-        operation.add_commit_mapping("old_hash", "new_hash")
-        assert operation.global_commit_mapping["old_hash"] == "new_hash"
 
 
 class TestExceptions:

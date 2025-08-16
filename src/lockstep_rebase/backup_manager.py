@@ -22,7 +22,7 @@ class BackupManager:
     """Manage creation, listing, deletion, and restoration of backup branches."""
 
     def __init__(self) -> None:
-        self._git = GitManager()
+        pass
 
     def make_backup_name(self, original_branch: str, session_id: Optional[str] = None) -> str:
         ts = session_id or datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -38,7 +38,8 @@ class BackupManager:
         backup_name = self.make_backup_name(original_branch, session_id)
         try:
             # Create or update backup branch to point to original_branch ref
-            self._git.create_or_update_branch(backup_name, original_branch, repo_path=repo_path)
+            gm = GitManager(repo_path)
+            gm.create_or_update_branch(backup_name, original_branch)
             logger.info(f"Created backup branch {backup_name} from {original_branch} in {repo_path}")
             return backup_name
         except GitRepositoryError as e:
@@ -49,7 +50,8 @@ class BackupManager:
         """List backup branches in the repository."""
         repo_path = Path(repo_path)
         try:
-            branches = self._git.list_local_branches(repo_path=repo_path)
+            gm = GitManager(repo_path)
+            branches = gm.list_local_branches()
             return [b for b in branches if b.startswith(f"{BACKUP_PREFIX}/")]
         except GitRepositoryError:
             return []
@@ -108,7 +110,8 @@ class BackupManager:
     def delete_backup_branch(self, repo_path: Path, backup_branch: str) -> None:
         repo_path = Path(repo_path)
         try:
-            self._git.delete_branch(backup_branch, repo_path=repo_path)
+            gm = GitManager(repo_path)
+            gm.delete_branch(backup_branch)
             logger.info(f"Deleted backup branch {backup_branch} in {repo_path}")
         except GitRepositoryError as e:
             logger.error(f"Failed to delete backup branch {backup_branch}: {e}")
@@ -119,10 +122,11 @@ class BackupManager:
         repo_path = Path(repo_path)
         try:
             # Ensure backup exists
-            if not self._git.branch_exists(backup_branch, repo_path=repo_path):
+            gm = GitManager(repo_path)
+            if not gm.branch_exists(backup_branch):
                 raise GitRepositoryError(f"Backup branch does not exist: {backup_branch}")
             # Create or update the original branch to point at the backup ref
-            self._git.create_or_update_branch(original_branch, backup_branch, repo_path=repo_path)
+            gm.create_or_update_branch(original_branch, backup_branch)
             logger.info(f"Restored {original_branch} from {backup_branch} in {repo_path}")
         except GitRepositoryError as e:
             logger.error(f"Failed to restore {original_branch} from {backup_branch}: {e}")

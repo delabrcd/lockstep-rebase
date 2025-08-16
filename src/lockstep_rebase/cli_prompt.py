@@ -7,7 +7,6 @@ from __future__ import annotations
 from typing import Dict, List
 import click
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
 
 from .prompt_interface import UserPrompt, BranchSyncAction
@@ -23,7 +22,7 @@ class CliPrompt(UserPrompt):
         self, repo_name: str, branch_name: str, remote_name: str = "origin"
     ) -> bool:
         """Ask user if they want to use a remote branch when local doesn't exist."""
-        self.console.print(f"\n⚠️  **Branch Missing Locally**", style="bold yellow")
+        self.console.print("\n⚠️  **Branch Missing Locally**", style="bold yellow")
         self.console.print(f"Repository: {repo_name}")
         self.console.print(f"Branch: {branch_name}")
         self.console.print(f"Local branch not found, but {remote_name}/{branch_name} exists.")
@@ -40,7 +39,7 @@ class CliPrompt(UserPrompt):
         commits_ahead: int,
     ) -> BranchSyncAction:
         """Ask user what to do when local branch is out of sync with remote."""
-        self.console.print(f"\n🔄 **Branch Out of Sync**", style="bold yellow")
+        self.console.print("\n🔄 **Branch Out of Sync**", style="bold yellow")
         self.console.print(f"Repository: {repo_name}")
         self.console.print(f"Branch: {branch_name}")
         self.console.print(f"Local commit:  {local_commit}")
@@ -95,18 +94,18 @@ class CliPrompt(UserPrompt):
 
         # Show missing branches
         if missing_branches["missing_source"]:
-            self.console.print(f"\n❌ **Missing Source Branches:**", style="bold red")
+            self.console.print("\n❌ **Missing Source Branches:**", style="bold red")
             for repo in missing_branches["missing_source"]:
                 self.console.print(f"  • {repo}")
 
         if missing_branches["missing_target"]:
-            self.console.print(f"\n❌ **Missing Target Branches:**", style="bold red")
+            self.console.print("\n❌ **Missing Target Branches:**", style="bold red")
             for repo in missing_branches["missing_target"]:
                 self.console.print(f"  • {repo}")
 
         # Show sync issues
         if sync_issues:
-            self.console.print(f"\n⚠️  **Branch Sync Issues:**", style="bold yellow")
+            self.console.print("\n⚠️  **Branch Sync Issues:**", style="bold yellow")
             for repo, issues in sync_issues.items():
                 self.console.print(f"  • {repo}:")
                 for branch, issue in issues.items():
@@ -124,17 +123,24 @@ class CliPrompt(UserPrompt):
     ) -> bool:
         """Prompt to include a submodule detected as updated in the commit range."""
         panel = Panel(
+            f"[bold]Changes detected on both parent branches[/bold]\n"
             f"Parent: [cyan]{parent_repo}[/cyan]\n"
             f"Submodule: [yellow]{submodule_path}[/yellow]\n"
-            f"Pointer: [red]{(tgt_sha or '')[:8]}[/red] → [green]{(src_sha or '')[:8]}[/green]\n"
-            f"Suggested branches: [green]{suggested_src}[/green] → [blue]{suggested_tgt}[/blue]",
-            title="Updated Submodule Detected",
+            f"Pointer difference (target → source): [red]{(tgt_sha or '')[:8]}[/red] → [green]{(src_sha or '')[:8]}[/green]\n\n"
+            "This means the parent repository points to different commits of this submodule on the\n"
+            "target and source branches.\n"
+            "[bold yellow]If you do not rebase this submodule first, the parent rebase will likely hit\n"
+            "merge conflicts[/bold yellow] requiring manual resolution when updating the submodule pointer.\n\n"
+            f"Suggested submodule branches: [green]{suggested_src}[/green] → [blue]{suggested_tgt}[/blue]",
+            title="Submodule Updated on Both Branches",
             border_style="magenta",
         )
         self.console.print(panel)
         return click.confirm("Include this submodule in the rebase plan?", default=True)
 
-    def choose_submodule_branches(self, submodule_repo: str, default_src: str, default_tgt: str) -> tuple[str, str]:
+    def choose_submodule_branches(
+        self, submodule_repo: str, default_src: str, default_tgt: str
+    ) -> tuple[str, str]:
         """Allow user to override inferred submodule branches."""
         self.console.print(
             f"\n🧭 Configure branches for submodule [cyan]{submodule_repo}[/cyan] (press Enter to accept defaults)",

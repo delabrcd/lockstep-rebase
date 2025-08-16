@@ -68,7 +68,6 @@ class RebaseOperation:
     source_branch: str
     target_branch: str
     repo_states: List[RebaseState] = field(default_factory=list)
-    global_commit_mapping: Dict[str, str] = field(default_factory=dict)
     # Backup metadata
     backup_session_id: Optional[str] = None
     # Map of repo path (str) -> backup branch name
@@ -80,10 +79,6 @@ class RebaseOperation:
             if state.repo.path == repo_path:
                 return state
         return None
-
-    def add_commit_mapping(self, old_hash: str, new_hash: str) -> None:
-        """Add a commit hash mapping to the global mapping."""
-        self.global_commit_mapping[old_hash] = new_hash
 
 
 class RebaseError(Exception):
