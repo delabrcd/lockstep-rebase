@@ -111,3 +111,35 @@ class CliPrompt(UserPrompt):
                 self.console.print(f"  • {repo}:")
                 for branch, issue in issues.items():
                     self.console.print(f"    - {branch}: {issue}")
+
+    # --- Auto-discovery prompts ---
+    def confirm_include_updated_submodule(
+        self,
+        parent_repo: str,
+        submodule_path: str,
+        src_sha: str,
+        tgt_sha: str,
+        suggested_src: str,
+        suggested_tgt: str,
+    ) -> bool:
+        """Prompt to include a submodule detected as updated in the commit range."""
+        panel = Panel(
+            f"Parent: [cyan]{parent_repo}[/cyan]\n"
+            f"Submodule: [yellow]{submodule_path}[/yellow]\n"
+            f"Pointer: [red]{(tgt_sha or '')[:8]}[/red] → [green]{(src_sha or '')[:8]}[/green]\n"
+            f"Suggested branches: [green]{suggested_src}[/green] → [blue]{suggested_tgt}[/blue]",
+            title="Updated Submodule Detected",
+            border_style="magenta",
+        )
+        self.console.print(panel)
+        return click.confirm("Include this submodule in the rebase plan?", default=True)
+
+    def choose_submodule_branches(self, submodule_repo: str, default_src: str, default_tgt: str) -> tuple[str, str]:
+        """Allow user to override inferred submodule branches."""
+        self.console.print(
+            f"\n🧭 Configure branches for submodule [cyan]{submodule_repo}[/cyan] (press Enter to accept defaults)",
+            style="bold blue",
+        )
+        src = click.prompt("Source branch", default=default_src, show_default=True)
+        tgt = click.prompt("Target branch", default=default_tgt, show_default=True)
+        return src.strip(), tgt.strip()

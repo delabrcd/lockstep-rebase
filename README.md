@@ -106,6 +106,32 @@ lockstep-rebase rebase feature/top main \
   --branch-map tools/formatter=feature/fmt:dev
 ```
 
+### Auto-Discovery of Updated Submodules
+```bash
+# Detect submodules whose pointers changed between target..source
+lockstep-rebase rebase feature/top main --auto-select-submodules
+```
+
+- Automatically detects submodules updated in the parent repo between branches.
+- Infers per-submodule source/target branches from submodule commit pointers.
+- Prompts you to include each updated submodule and allows branch overrides.
+
+#### Combine with filters and branch-map
+```bash
+# Include/exclude still apply
+lockstep-rebase rebase feature/top main \
+  --auto-select-submodules \
+  --include libs/core \
+  --exclude experimental-lib
+  
+# Branch overrides are respected
+lockstep-rebase rebase feature/top main \
+  --auto-select-submodules \
+  --branch-map libs/core=feature/core-top:release/1.2
+```
+
+Tip: Use --dry-run to preview the discovered plan.
+
 Notes:
 - Identifiers for `--include`, `--exclude`, and `--branch-map` keys can be repo name, relative path from root, or absolute path.
 - `--branch-map` format is `repo=SRC[:TGT]`. If `:TGT` is omitted, the global target branch is used for that repo.

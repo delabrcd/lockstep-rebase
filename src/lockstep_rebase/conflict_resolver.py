@@ -5,13 +5,13 @@ Conflict resolution handling for Git rebase operations.
 from __future__ import annotations
 
 import logging
-import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .models import ConflictResolutionError, RepoInfo, ResolvedCommit, ResolutionSummary
 from .commit_tracker import GlobalCommitTracker
 from .conflict_prompt_interface import ConflictPrompt, NoOpConflictPrompt
+from .git_manager import GitManager
 
 
 logger = logging.getLogger(__name__)
@@ -21,10 +21,11 @@ class ConflictResolver:
     """Handles merge conflict resolution during rebase operations."""
 
     def __init__(
-        self, global_tracker: GlobalCommitTracker, conflict_prompt: ConflictPrompt = None
+        self, global_tracker: GlobalCommitTracker, git_manager: GitManager, conflict_prompt: ConflictPrompt = None
     ) -> None:
-        """Initialize conflict resolver with global commit tracker."""
+        """Initialize conflict resolver with global commit tracker and GitManager."""
         self.global_tracker = global_tracker
+        self.git_manager = git_manager
         self.resolution_summary = ResolutionSummary()
         self.conflict_prompt = conflict_prompt or NoOpConflictPrompt()
 
@@ -38,54 +39,32 @@ class ConflictResolver:
         conflicts = {"file_conflicts": [], "submodule_conflicts": []}
 
         try:
-            # Get conflicted files
-            result = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
+            # Use GitManager to get unresolved merge paths
+            unresolved_paths = self.git_manager.get_conflict_files(repo_path)
 
-            for line in result.stdout.strip().split("\n"):
-                if not line:
-                    continue
-
-                status = line[:2]
-                filepath = line[3:]
-
-                # Check for merge conflicts (UU, AA, etc.)
-                if "U" in status or "A" in status:
-                    if self._is_submodule_path(repo_path, filepath):
-                        conflicts["submodule_conflicts"].append(filepath)
-                    else:
-                        conflicts["file_conflicts"].append(filepath)
+            for filepath in unresolved_paths:
+                if self.git_manager.is_submodule_path(repo_path, filepath):
+                    conflicts["submodule_conflicts"].append(filepath)
+                else:
+                    conflicts["file_conflicts"].append(filepath)
 
             logger.debug(
                 f"Found {len(conflicts['file_conflicts'])} file conflicts and "
                 f"{len(conflicts['submodule_conflicts'])} submodule conflicts"
             )
 
-        except subprocess.CalledProcessError as e:
+        except Exception as e:
             logger.error(f"Error analyzing conflicts: {e}")
             raise ConflictResolutionError(f"Failed to analyze conflicts: {e}")
 
         return conflicts
 
     def _is_submodule_path(self, repo_path: Path, filepath: str) -> bool:
-        """Check if a file path corresponds to a submodule."""
+        """Deprecated: kept for backward-compat; delegates to GitManager."""
         try:
-            # Check if .gitmodules exists and contains this path
-            gitmodules_path = repo_path / ".gitmodules"
-            if not gitmodules_path.exists():
-                return False
-
-            with open(gitmodules_path, "r") as f:
-                content = f.read()
-                return f"path = {filepath}" in content
-
+            return self.git_manager.is_submodule_path(repo_path, filepath)
         except Exception as e:
-            logger.debug(f"Error checking submodule path: {e}")
+            logger.debug(f"Error checking submodule path via GitManager: {e}")
             return False
 
     def auto_resolve_submodule_conflicts(
@@ -122,34 +101,16 @@ class ConflictResolver:
             True if resolved successfully, False otherwise
         """
         try:
-            # Get the conflicted submodule information
-            result = subprocess.run(
-                ["git", "ls-files", "-u", submodule_path],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-
-            if not result.stdout.strip():
+            # Get the conflicted submodule index entries via GitManager
+            entries = self.git_manager.get_unmerged_index_entries(repo_path, submodule_path)
+            if not entries:
                 return False
-
-            # Parse the conflicted entries
-            entries = []
-            for line in result.stdout.strip().split("\n"):
-                parts = line.split("\t")
-                if len(parts) >= 2:
-                    mode_hash = parts[0].split()
-                    if len(mode_hash) >= 2:
-                        entries.append(
-                            {"stage": mode_hash[2], "hash": mode_hash[1], "path": parts[1]}
-                        )
 
             # Find the incoming commit hash (stage 3)
             incoming_hash = None
             for entry in entries:
-                if entry["stage"] == "3":  # Theirs (incoming)
-                    incoming_hash = entry["hash"]
+                if entry.get("stage") == "3":  # Theirs (incoming)
+                    incoming_hash = entry.get("hash")
                     break
 
             if not incoming_hash:
@@ -164,19 +125,12 @@ class ConflictResolver:
 
             # Update the submodule to the resolved hash
             submodule_full_path = repo_path / submodule_path
-            subprocess.run(
-                ["git", "checkout", resolved_hash],
-                cwd=submodule_full_path,
-                check=True,
-                capture_output=True,
-            )
+            self.git_manager.checkout_commit(resolved_hash, submodule_full_path)
 
-            # Stage the resolved submodule
-            subprocess.run(
-                ["git", "add", submodule_path], cwd=repo_path, check=True, capture_output=True
-            )
+            # Stage the resolved submodule in parent repo
+            self.git_manager.add_paths([submodule_path], repo_path)
 
-            # Get commit messages for tracking
+            # Get commit messages for tracking via GitManager
             original_message = self._get_commit_message(submodule_full_path, incoming_hash)
             resolved_message = self._get_commit_message(submodule_full_path, resolved_hash)
 
@@ -199,11 +153,8 @@ class ConflictResolver:
             logger.info(f"Resolved submodule {submodule_path} to commit {resolved_hash[:8]}")
             return True
 
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Git command failed while resolving submodule conflict: {e}")
-            return False
         except Exception as e:
-            logger.error(f"Unexpected error resolving submodule conflict: {e}")
+            logger.error(f"Error resolving submodule conflict: {e}")
             return False
 
     def _find_resolved_submodule_hash(self, original_hash: str) -> Optional[str]:
@@ -220,17 +171,10 @@ class ConflictResolver:
         return None
 
     def _get_commit_message(self, repo_path: Path, commit_hash: str) -> Optional[str]:
-        """Get the commit message for a given commit hash."""
+        """Get the commit message for a given commit hash via GitManager."""
         try:
-            result = subprocess.run(
-                ["git", "log", "-1", "--format=%s", commit_hash],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            return result.stdout.strip()
-        except subprocess.CalledProcessError as e:
+            return self.git_manager.get_commit_subject(commit_hash, repo_path)
+        except Exception as e:
             logger.debug(f"Could not get commit message for {commit_hash[:8]}: {e}")
             return None
 
@@ -317,32 +261,16 @@ class ConflictResolver:
             contains user-facing guidance strings suitable for CLI display.
         """
         try:
-            # Check for unmerged files
-            result = subprocess.run(
-                ["git", "diff", "--name-only", "--diff-filter=U"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-
-            unresolved_files = [f.strip() for f in result.stdout.split("\n") if f.strip()]
+            # Check for unmerged files via GitManager
+            unresolved_files = self.git_manager.get_conflict_files(repo_path)
 
             if unresolved_files:
                 return False, [
                     f"❌ Still have unresolved conflicts in: {', '.join(unresolved_files)}"
                 ]
 
-            # Check that changes are staged
-            result = subprocess.run(
-                ["git", "diff", "--cached", "--name-only"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-
-            staged_files = [f.strip() for f in result.stdout.split("\n") if f.strip()]
+            # Check that changes are staged via GitManager
+            staged_files = self.git_manager.get_staged_files(repo_path)
 
             if not staged_files:
                 return False, [
@@ -351,7 +279,7 @@ class ConflictResolver:
 
             return True, []
 
-        except subprocess.CalledProcessError as e:
+        except Exception as e:
             logger.error(f"Error verifying conflict resolution: {e}")
             return False, [f"Error verifying conflict resolution: {e}"]
 
@@ -360,31 +288,17 @@ class ConflictResolver:
         return self.verify_conflicts_resolved(repo_path)
 
     def stage_resolved_conflicts(self, repo_path: Path, resolved_files: List[str]) -> None:
-        """Stage resolved conflict files."""
+        """Stage resolved conflict files using GitManager."""
         try:
-            for file_path in resolved_files:
-                subprocess.run(
-                    ["git", "add", file_path], cwd=repo_path, check=True, capture_output=True
-                )
-
+            self.git_manager.add_paths(resolved_files, repo_path)
             logger.info(f"Staged {len(resolved_files)} resolved files")
-
-        except subprocess.CalledProcessError as e:
+        except Exception as e:
             logger.error(f"Error staging resolved files: {e}")
             raise ConflictResolutionError(f"Failed to stage resolved files: {e}")
 
     def has_unstaged_changes(self, repo_path: Path) -> bool:
-        """Check if repository has unstaged changes."""
+        """Check if repository has unstaged changes via GitManager."""
         try:
-            result = subprocess.run(
-                ["git", "diff", "--name-only"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-
-            return bool(result.stdout.strip())
-
-        except subprocess.CalledProcessError:
+            return self.git_manager.has_unstaged_changes(repo_path)
+        except Exception:
             return False

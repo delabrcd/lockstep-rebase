@@ -5,7 +5,7 @@ UI-agnostic prompt interface for user interactions.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from enum import Enum
 
 
@@ -44,6 +44,36 @@ class UserPrompt(ABC):
 
         Returns:
             True if user wants to use remote branch, False otherwise
+        """
+        pass
+
+    # --- Auto-discovery prompts ---
+    @abstractmethod
+    def confirm_include_updated_submodule(
+        self,
+        parent_repo: str,
+        submodule_path: str,
+        src_sha: str,
+        tgt_sha: str,
+        suggested_src: str,
+        suggested_tgt: str,
+    ) -> bool:
+        """
+        Inform the user that a submodule pointer was updated in commits to rebase and ask if it
+        should be included in the rebase plan.
+
+        Returns True if the user wants to include it.
+        """
+        pass
+
+    @abstractmethod
+    def choose_submodule_branches(
+        self, submodule_repo: str, default_src: str, default_tgt: str
+    ) -> Tuple[str, str]:
+        """
+        Allow the user to confirm or override the inferred source/target branches for a submodule.
+
+        Returns (source_branch, target_branch).
         """
         pass
 
@@ -132,3 +162,17 @@ class NoOpPrompt(UserPrompt):
         self, missing_branches: Dict[str, List[str]], sync_issues: Dict[str, Dict[str, str]]
     ) -> None:
         pass
+
+    def confirm_include_updated_submodule(
+        self,
+        parent_repo: str,
+        submodule_path: str,
+        src_sha: str,
+        tgt_sha: str,
+        suggested_src: str,
+        suggested_tgt: str,
+    ) -> bool:
+        return False
+
+    def choose_submodule_branches(self, submodule_repo: str, default_src: str, default_tgt: str) -> Tuple[str, str]:
+        return default_src, default_tgt
