@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import  List, Optional, Tuple
 
 from .models import ConflictResolutionError, RepoInfo, ResolvedCommit, ResolutionSummary
 from .commit_tracker import GlobalCommitTracker
@@ -18,58 +18,58 @@ logger = logging.getLogger(__name__)
 
 
 class ConflictResolver:
-    """Handles merge conflict resolution during rebase operations."""
+    """Handles merge conflict resolution during rebase operations.
+
+    Requires a bound GitManager for the target repository. Repo_path parameters
+    are kept for signature compatibility but are generally ignored; the attached
+    GitManager is always used for the parent repository. A new GitManager may be
+    created only when operating inside a submodule's working directory.
+    """
 
     def __init__(
-        self, global_tracker: GlobalCommitTracker, conflict_prompt: ConflictPrompt = None
+        self,
+        global_tracker: GlobalCommitTracker,
+        conflict_prompt: ConflictPrompt = None,
+        git_manager: GitManager = None,
     ) -> None:
-        """Initialize conflict resolver with global commit tracker."""
+        """Initialize conflict resolver with global commit tracker and optional GitManager."""
         self.global_tracker = global_tracker
         self.resolution_summary = ResolutionSummary()
         self.conflict_prompt = conflict_prompt or NoOpConflictPrompt()
+        self.git_manager: GitManager = git_manager
 
-    def analyze_conflicts(self, repo_path: Path) -> Dict[str, List[str]]:
+    def analyze_conflicts(self) -> Tuple[List[str], List[str]]:
         """
         Analyze conflicts in a repository.
 
         Returns:
-            Dictionary with 'file_conflicts' and 'submodule_conflicts' keys
+            Tuple of (file_conflicts, submodule_conflicts)
         """
-        conflicts = {"file_conflicts": [], "submodule_conflicts": []}
+        file_conflicts = []
+        submodule_conflicts = []
 
         try:
-            # Use a per-repo GitManager to get unresolved merge paths
-            gm = GitManager(repo_path)
-            unresolved_paths = gm.get_conflict_files()
+            unresolved_paths = self.git_manager.get_conflict_files()
 
             for filepath in unresolved_paths:
-                if gm.is_submodule_path(filepath):
-                    conflicts["submodule_conflicts"].append(filepath)
+                if self.git_manager.is_submodule_path(filepath):
+                    submodule_conflicts.append(filepath)
                 else:
-                    conflicts["file_conflicts"].append(filepath)
+                    file_conflicts.append(filepath)
 
             logger.debug(
-                f"Found {len(conflicts['file_conflicts'])} file conflicts and "
-                f"{len(conflicts['submodule_conflicts'])} submodule conflicts"
+                f"Found {len(file_conflicts)} file conflicts and "
+                f"{len(submodule_conflicts)} submodule conflicts"
             )
 
         except Exception as e:
             logger.error(f"Error analyzing conflicts: {e}")
             raise ConflictResolutionError(f"Failed to analyze conflicts: {e}")
 
-        return conflicts
-
-    def _is_submodule_path(self, repo_path: Path, filepath: str) -> bool:
-        """Deprecated: kept for backward-compat; delegates to GitManager."""
-        try:
-            gm = GitManager(repo_path)
-            return gm.is_submodule_path(filepath)
-        except Exception as e:
-            logger.debug(f"Error checking submodule path via GitManager: {e}")
-            return False
+        return file_conflicts, submodule_conflicts
 
     def auto_resolve_submodule_conflicts(
-        self, repo_path: Path, submodule_conflicts: List[str]
+        self, conflicted_submodules: List[RepoInfo]
     ) -> Tuple[List[str], List[str]]:
         """
         Attempt to automatically resolve submodule conflicts using commit mappings.
@@ -80,21 +80,15 @@ class ConflictResolver:
         resolved = []
         unresolved = []
 
-        for submodule_path in submodule_conflicts:
-            try:
-                if self._resolve_submodule_conflict(repo_path, submodule_path):
-                    resolved.append(submodule_path)
-                    logger.info(f"Auto-resolved submodule conflict: {submodule_path}")
-                else:
-                    unresolved.append(submodule_path)
-                    logger.warning(f"Could not auto-resolve submodule conflict: {submodule_path}")
-            except Exception as e:
-                logger.error(f"Error resolving submodule conflict {submodule_path}: {e}")
-                unresolved.append(submodule_path)
+        for submodule in conflicted_submodules:
+            if self._resolve_submodule_conflict(submodule):
+                resolved.append(submodule.path)
+            else:
+                unresolved.append(submodule.path)
 
         return resolved, unresolved
 
-    def _resolve_submodule_conflict(self, repo_path: Path, submodule_path: str) -> bool:
+    def _resolve_submodule_conflict(self, submodule: RepoInfo) -> bool:
         """
         Resolve a single submodule conflict by finding the correct commit hash.
 
@@ -102,9 +96,10 @@ class ConflictResolver:
             True if resolved successfully, False otherwise
         """
         try:
-            # Get the conflicted submodule index entries via GitManager
-            gm_parent = GitManager(repo_path)
-            entries = gm_parent.get_unmerged_index_entries(submodule_path)
+            gm_parent = self.git_manager
+
+
+            entries = gm_parent.get_unmerged_index_entries(submodule.path)
             if not entries:
                 return False
 
@@ -116,7 +111,7 @@ class ConflictResolver:
                     break
 
             if not incoming_hash:
-                logger.warning(f"Could not find incoming hash for submodule {submodule_path}")
+                logger.warning(f"Could not find incoming hash for submodule {submodule.path}")
                 return False
 
             # Try to resolve using commit mappings
@@ -125,35 +120,59 @@ class ConflictResolver:
                 logger.warning(f"Could not find resolved hash for {incoming_hash[:8]}")
                 return False
 
-            # Update the submodule to the resolved hash
-            submodule_full_path = repo_path / submodule_path
-            gm_sub = GitManager(submodule_full_path)
+            gm_sub = submodule.git_manager
             gm_sub.checkout_commit(resolved_hash)
 
             # Stage the resolved submodule in parent repo
-            gm_parent.add_paths([submodule_path])
+            gm_parent.add_paths([submodule.path])
 
-            # Get commit messages for tracking via GitManager
-            original_message = self._get_commit_message(submodule_full_path, incoming_hash)
-            resolved_message = self._get_commit_message(submodule_full_path, resolved_hash)
+            # Verify that the index reflects the resolution and the path is staged
+            try:
+                remaining = gm_parent.get_unmerged_index_entries(submodule.path)
+                if remaining:
+                    logger.warning(
+                        f"Submodule {submodule.path} still has unmerged index entries after staging: {remaining}"
+                    )
+                else:
+                    staged = gm_parent.get_staged_files()
+                    if submodule.path not in staged:
+                        logger.warning(
+                            f"Submodule {submodule.path} did not appear in staged files after staging; staged now: {staged}"
+                        )
+                    else:
+                        logger.debug(
+                            f"Submodule {submodule.path} staged successfully in parent repo"
+                        )
+                # Additional check: ensure the path is no longer reported as a conflict
+                still_conflicted = gm_parent.get_conflict_files()
+                if submodule.path in still_conflicted:
+                    logger.warning(
+                        f"Submodule {submodule.path} still reported as conflicted after staging"
+                    )
+            except Exception:
+                # Diagnostics only; do not fail the resolution if logging checks error out
+                pass
+
+            # Get commit messages for tracking from the submodule repo
+            # The incoming/resolved hashes belong to the submodule, not the parent
+            original_message = gm_sub.get_commit_subject(incoming_hash)
+            resolved_message = gm_sub.get_commit_subject(resolved_hash)
 
             # Track the resolution
-            repo_name = repo_path.name
             self._track_resolved_commit(
-                repo_name,
                 incoming_hash,
                 resolved_hash,
                 resolved_message or "<unknown>",
-                submodule_path,
+                submodule.path,
             )
 
             # Check message consistency
             if original_message and resolved_message and original_message != resolved_message:
                 self.resolution_summary.message_consistency_issues.append(
-                    f"{repo_name}/{submodule_path}: Original message '{original_message}' != Resolved message '{resolved_message}'"
+                    f"{submodule.path}: Original message '{original_message}' != Resolved message '{resolved_message}'"
                 )
 
-            logger.info(f"Resolved submodule {submodule_path} to commit {resolved_hash[:8]}")
+            logger.info(f"Resolved submodule {submodule.path} to commit {resolved_hash[:8]}")
             return True
 
         except Exception as e:
@@ -173,26 +192,18 @@ class ConflictResolver:
 
         return None
 
-    def _get_commit_message(self, repo_path: Path, commit_hash: str) -> Optional[str]:
+    def _get_commit_message(self, commit_hash: str) -> Optional[str]:
         """Get the commit message for a given commit hash via GitManager."""
-        try:
-            gm = GitManager(repo_path)
-            return gm.get_commit_subject(commit_hash)
-        except Exception as e:
-            logger.debug(f"Could not get commit message for {commit_hash[:8]}: {e}")
-            return None
+        return self.git_manager.get_commit_subject(commit_hash)
 
     def _track_resolved_commit(
         self,
-        repo_name: str,
         original_hash: str,
         resolved_hash: str,
         message: str,
-        submodule_path: str,
+        submodule_path: Path,
     ) -> None:
         """Track a resolved commit for later reporting."""
-        if repo_name not in self.resolution_summary.resolved_commits_by_repo:
-            self.resolution_summary.resolved_commits_by_repo[repo_name] = []
 
         resolved_commit = ResolvedCommit(
             original_hash=original_hash,
@@ -201,10 +212,10 @@ class ConflictResolver:
             submodule_path=submodule_path,
         )
 
-        self.resolution_summary.resolved_commits_by_repo[repo_name].append(resolved_commit)
+        self.resolution_summary.resolved_commits.append(resolved_commit)
 
         # Keep the list sorted by submodule path for consistent display
-        self.resolution_summary.resolved_commits_by_repo[repo_name].sort(
+        self.resolution_summary.resolved_commits.sort(
             key=lambda x: x.submodule_path
         )
 
@@ -214,7 +225,7 @@ class ConflictResolver:
 
     def has_resolutions(self) -> bool:
         """Check if any automatic resolutions were made."""
-        return bool(self.resolution_summary.resolved_commits_by_repo)
+        return bool(self.resolution_summary.resolved_commits)
 
     def clear_resolution_summary(self) -> None:
         """Clear the resolution summary (useful for new operations)."""
@@ -265,17 +276,18 @@ class ConflictResolver:
             contains user-facing guidance strings suitable for CLI display.
         """
         try:
-            gm = GitManager(repo_path)
-            # Check for unmerged files via GitManager
-            unresolved_files = gm.get_conflict_files()
+            if not self.git_manager:
+                raise ConflictResolutionError("No GitManager attached to ConflictResolver")
+            # Check for unmerged files via attached GitManager
+            unresolved_files = self.git_manager.get_conflict_files()
 
             if unresolved_files:
                 return False, [
                     f"❌ Still have unresolved conflicts in: {', '.join(unresolved_files)}"
                 ]
 
-            # Check that changes are staged via GitManager
-            staged_files = gm.get_staged_files()
+            # Check that changes are staged via attached GitManager
+            staged_files = self.git_manager.get_staged_files()
 
             if not staged_files:
                 return False, [
@@ -295,8 +307,9 @@ class ConflictResolver:
     def stage_resolved_conflicts(self, repo_path: Path, resolved_files: List[str]) -> None:
         """Stage resolved conflict files using GitManager."""
         try:
-            gm = GitManager(repo_path)
-            gm.add_paths(resolved_files)
+            if not self.git_manager:
+                raise ConflictResolutionError("No GitManager attached to ConflictResolver")
+            self.git_manager.add_paths(resolved_files)
             logger.info(f"Staged {len(resolved_files)} resolved files")
         except Exception as e:
             logger.error(f"Error staging resolved files: {e}")
@@ -305,7 +318,8 @@ class ConflictResolver:
     def has_unstaged_changes(self, repo_path: Path) -> bool:
         """Check if repository has unstaged changes via GitManager."""
         try:
-            gm = GitManager(repo_path)
-            return gm.has_unstaged_changes()
+            if not self.git_manager:
+                raise ConflictResolutionError("No GitManager attached to ConflictResolver")
+            return self.git_manager.has_unstaged_changes()
         except Exception:
             return False

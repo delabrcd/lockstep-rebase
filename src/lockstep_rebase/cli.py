@@ -9,7 +9,8 @@ from logging.handlers import RotatingFileHandler
 import os
 import sys
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict
+from datetime import datetime
 
 import click
 from rich.console import Console
@@ -20,7 +21,7 @@ from rich.tree import Tree
 from .rebase_orchestrator import RebaseOrchestrator
 from .cli_prompt import CliPrompt
 from .cli_conflict_prompt import CliConflictPrompt
-from .models import RebaseError
+from .models import RebaseError, ResolutionSummary
 
 
 console = Console()
@@ -39,27 +40,63 @@ def _default_log_path() -> Path:
 
 
 def setup_logging(verbose: bool = False, console_level: Optional[str] = None, log_file: Optional[Path] = None) -> Path:
-    """Setup logging:
-    - Always log to a rotating file at DEBUG level by default
+    """Setup logging with per-run file + stable aggregate, fully cross-platform:
+    - Per-run log file: <stem>-YYYYMMDD_HHMMSS.log (non-rotating)
+    - Stable aggregate log: <stem>.log (rotated)
+    - Best-effort hardlink: <stem>-current.log -> per-run file (Windows-friendly)
     - Console logging disabled by default; enable via --verbose or --log-level
-    Returns the path to the log file.
+    Returns the best path to open for this run (current-link if created, else aggregate, else per-run).
     """
-    log_path = log_file or _default_log_path()
+    # Determine base paths
+    provided = Path(log_file) if log_file else _default_log_path()
+    if provided.exists() and provided.is_dir():
+        base_dir = provided
+        base_stem = "lockstep-rebase"
+        stable_aggregate_path = base_dir / f"{base_stem}.log"
+    else:
+        base_dir = provided.parent
+        base_stem = provided.stem or "lockstep-rebase"
+        stable_aggregate_path = provided
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    per_run_path = base_dir / f"{base_stem}-{timestamp}.log"
+    current_link_path = base_dir / f"{base_stem}-current.log"
 
     root = logging.getLogger()
     # Clear existing handlers to avoid duplication in tests / repeated invocations
     root.handlers.clear()
     root.setLevel(logging.DEBUG)
 
-    # File handler (always on)
-    file_handler = RotatingFileHandler(str(log_path), maxBytes=1_000_000, backupCount=3)
-    file_handler.setLevel(logging.DEBUG)
+    # File handler -> per-run file (non-rotating; bounded by run duration)
+    run_file_handler = logging.FileHandler(str(per_run_path), encoding="utf-8")
+    run_file_handler.setLevel(logging.DEBUG)
     file_fmt = logging.Formatter(
         fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    file_handler.setFormatter(file_fmt)
-    root.addHandler(file_handler)
+    run_file_handler.setFormatter(file_fmt)
+    root.addHandler(run_file_handler)
+
+    # Second handler -> stable aggregate file (provides an easy always-on path)
+    aggregate_handler = RotatingFileHandler(str(stable_aggregate_path), maxBytes=1_000_000, backupCount=3)
+    aggregate_handler.setLevel(logging.DEBUG)
+    aggregate_handler.setFormatter(file_fmt)
+    root.addHandler(aggregate_handler)
+
+    # Best-effort: create a hardlink pointing at the current run (works on NTFS/Unix without admin)
+    created_hardlink = False
+    try:
+        if current_link_path.exists():
+            try:
+                current_link_path.unlink()
+            except Exception:
+                pass
+        os.link(per_run_path, current_link_path)
+        created_hardlink = True
+    except Exception:
+        # Hardlinks may be unsupported across volumes or filesystems; ignore
+        created_hardlink = False
 
     # Console handler (optional)
     if verbose or console_level:
@@ -76,7 +113,14 @@ def setup_logging(verbose: bool = False, console_level: Optional[str] = None, lo
         console_handler.setFormatter(logging.Formatter("%(message)s"))
         root.addHandler(console_handler)
 
-    return log_path
+    # Choose the most convenient path to present to the user
+    if created_hardlink:
+        notice_path = current_link_path
+    elif stable_aggregate_path:
+        notice_path = stable_aggregate_path
+    else:
+        notice_path = per_run_path
+    return notice_path
 
 
 def _maybe_print_log_notice(verbose: bool, console_level: Optional[str], log_path: Path) -> None:
@@ -250,15 +294,22 @@ def rebase(
         console.print("\n🎉 **Rebase completed successfully!**", style="bold green")
 
         # Get resolution summary for display (only if explicitly True)
-        resolution_summary = orchestrator.conflict_resolver.get_resolution_summary()
+        resolution_summary = orchestrator.collect_resolution_summary()
         # Show commit mappings with auto-resolved commits organized by repository
         _display_commit_mappings(resolution_summary)
 
         # Prompt to delete backups
-        backups = len(operation.backup_branches)
-        if backups:
+        # Prefer showing the count across the hierarchy for the current session
+        total_backups = len(operation.backup_branches)
+        session_id = getattr(operation, "backup_session_id", None)
+        if isinstance(session_id, str) and session_id:
+            entries = orchestrator.list_backups_across_hierarchy()
+            total_backups = len([e for e in entries if e.session == session_id])
+
+        if total_backups:
             if click.confirm(
-                f"\nDelete {backups} backup branch(es) created for this rebase?", default=False
+                f"\nDelete {total_backups} backup branch(es) created for this rebase session?",
+                default=False,
             ):
                 deleted = orchestrator.delete_backups(operation)
                 console.print(f"🧹 Deleted {deleted} backup branch(es)", style="bold green")
@@ -378,6 +429,12 @@ def backups_list(
     is_flag=True,
     help="Delete backups from the most recent session (ignored if --session-id is given)",
 )
+@click.option(
+    "--original-branch",
+    "original_branch",
+    type=str,
+    help="Filter by original branch when using --session-id/--latest",
+)
 @click.option("--repo-path", type=click.Path(exists=True, path_type=Path), help="Repository path")
 @click.pass_context
 def backups_delete(
@@ -386,6 +443,7 @@ def backups_delete(
     delete_all: bool,
     session_id: Optional[str],
     latest: bool,
+    original_branch: Optional[str],
     repo_path: Optional[Path],
 ) -> None:
     """Delete backup branches (interactive if no options provided)."""
@@ -394,18 +452,26 @@ def backups_delete(
         root = repo_path or ctx.obj.get("repo_path")
         orchestrator = RebaseOrchestrator(root)
 
-        # Session-based deletion (preferred)
+        # Session-based deletion (preferred). Operates across hierarchy by default.
         if session_id or latest:
             if repo_path:
                 entries = orchestrator.list_parsed_backups_in_repo(repo_path)
             else:
                 entries = orchestrator.list_backups_across_hierarchy()
 
+            # Optional filtering by original branch to narrow scope
+            if original_branch:
+                entries = [e for e in entries if e.original_branch == original_branch]
+
             if session_id:
                 entries = [e for e in entries if e.session == session_id]
+                effective_session = session_id
             elif latest and entries:
                 latest_session = max({e.session for e in entries})
                 entries = [e for e in entries if e.session == latest_session]
+                effective_session = latest_session
+            else:
+                effective_session = None
 
             if not entries:
                 console.print("No backups matching the given session id.")
@@ -415,14 +481,18 @@ def backups_delete(
             for e in entries:
                 if orchestrator.delete_backup_in_repo(e.backup_branch, e.repo_path):
                     count += 1
-            effective_session = session_id if session_id else latest_session
-            console.print(f"🧹 Deleted {count} backup branch(es) for session {effective_session}")
+            if effective_session:
+                console.print(
+                    f"🧹 Deleted {count} backup branch(es) for session {effective_session}"
+                )
+            else:
+                console.print(f"🧹 Deleted {count} backup branch(es)")
             return
 
+        # Per-repo deletion modes if explicitly requested
         target_path = repo_path or ctx.obj.get("repo_path")
-        branches = orchestrator.list_backups_in_repo(target_path)
-
         if delete_all:
+            branches = orchestrator.list_backups_in_repo(target_path)
             count = 0
             for b in branches:
                 if orchestrator.delete_backup_in_repo(b, target_path):
@@ -430,34 +500,75 @@ def backups_delete(
             console.print(f"🧹 Deleted {count} backup branch(es)")
             return
 
-        to_delete = list(backup_branch)
-        if not to_delete:
-            if not branches:
-                console.print("No backup branches to delete.")
-                return
-            console.print("Select backups to delete:")
-            for idx, b in enumerate(sorted(branches), 1):
-                console.print(f"  {idx}. {b}")
-            choices = click.prompt(
-                "Enter numbers separated by commas (or empty to cancel)", default=""
-            )
-            if not choices.strip():
-                console.print("Cancelled.")
-                return
-            try:
-                indices = {int(x.strip()) for x in choices.split(",") if x.strip()}
-            except ValueError:
-                console.print("Invalid selection.")
-                sys.exit(1)
-            sorted_branches = list(sorted(branches))
-            for i in indices:
-                if 1 <= i <= len(sorted_branches):
-                    to_delete.append(sorted_branches[i - 1])
+        if backup_branch:
+            count = 0
+            for b in backup_branch:
+                if orchestrator.delete_backup_in_repo(b, target_path):
+                    count += 1
+            console.print(f"🧹 Deleted {count} backup branch(es)")
+            return
 
-        count = 0
-        for b in to_delete:
-            if orchestrator.delete_backup_in_repo(b, target_path):
-                count += 1
+        # Default: interactive session picker across the hierarchy
+        entries = orchestrator.list_backups_across_hierarchy(
+            original_branch=original_branch
+        )
+        if not entries:
+            console.print("No backup branches found.")
+            return
+
+        sessions = sorted({e.session for e in entries}, reverse=True)
+        console.print("\nAvailable backup sessions:")
+        for i, s in enumerate(sessions, start=1):
+            count = sum(1 for e in entries if e.session == s)
+            console.print(f"  {i}. {s} • {count} backup(s)")
+
+        try:
+            idx = click.prompt(
+                "Select a session to delete (default: 1 = latest)", type=int, default=1
+            )
+            if idx < 1 or idx > len(sessions):
+                console.print("Invalid selection.")
+                return
+            chosen_session = sessions[idx - 1]
+
+            # Preview session details similar to 'backups list'
+            session_entries = [e for e in entries if e.session == chosen_session]
+            preview = Tree(f"🗂️ Session: [bold]{chosen_session}[/bold]", guide_style="dim")
+            by_orig: Dict[str, List] = {}
+            for e in session_entries:
+                by_orig.setdefault(e.original_branch, []).append(e)
+            for orig in sorted(by_orig.keys()):
+                group = by_orig[orig]
+                backup_branch = group[0].backup_branch if group else ""
+                items = []
+                for entry in sorted(group, key=lambda e: (e.repo_name, str(e.repo_path))):
+                    try:
+                        rel = str(entry.repo_path.relative_to(orchestrator.root_path))
+                    except Exception:
+                        rel = str(entry.repo_path)
+                    items.append(f"{entry.repo_name} ({rel})")
+                node = preview.add(
+                    f"[green]{orig}[/green] • [cyan]{backup_branch}[/cyan] • {len(group)} repo(s)"
+                )
+                node.add(", ".join(items))
+            console.print(preview)
+
+            if not click.confirm(
+                f"Delete all backups for session {chosen_session}?", default=False
+            ):
+                console.print("Deletion cancelled.")
+                return
+            count = orchestrator.delete_backups_by_session(
+                chosen_session, original_branch=original_branch
+            )
+            console.print(
+                f"🧹 Deleted {count} backup branch(es) for session {chosen_session}"
+            )
+            return
+        except (click.Abort, KeyboardInterrupt):
+            console.print("Deletion cancelled.")
+            return
+
         console.print(f"🧹 Deleted {count} backup branch(es)")
     except Exception as e:
         console.print(f"\n❌ **Error deleting backups:** {e}", style="bold red")
@@ -697,18 +808,10 @@ def _display_rebase_plan(operation) -> None:
     console.print(table)
 
 
-def _display_commit_mappings(resolution_summary=None) -> None:
+def _display_commit_mappings(resolution_summary: Dict[str, ResolutionSummary]) -> None:
     """Display commit hash mappings after successful rebase."""
-    if not resolution_summary:
+    if not isinstance(resolution_summary, dict) or not resolution_summary:
         console.print("\n📦 **No auto-resolved commits found.**", style="bold yellow")
-        return
-
-    # Only display if we have a concrete dict of resolved commits
-    try:
-        repos = getattr(resolution_summary, "resolved_commits_by_repo", None)
-    except Exception:
-        repos = None
-    if not isinstance(repos, dict) or not repos:
         return
 
     console.print("\n📦 **Auto-Resolved Submodule Commits by Repository:**")
@@ -723,8 +826,9 @@ def _display_commit_mappings(resolution_summary=None) -> None:
     table.add_column("Status", style="blue")
 
     # Sort repositories by name for consistent display
-    for repo_name in sorted(repos.keys()):
-        commits = repos.get(repo_name) or []
+    for repo_name in sorted(resolution_summary.keys()):
+        repo_summary = resolution_summary.get(repo_name)
+        commits = getattr(repo_summary, "resolved_commits", []) or []
         try:
             iterator = list(commits)
         except Exception:
@@ -737,7 +841,7 @@ def _display_commit_mappings(resolution_summary=None) -> None:
             # Check if this commit has message consistency issues
             status = "✅ OK"
             try:
-                issues = getattr(resolution_summary, "message_consistency_issues", []) or []
+                issues = getattr(repo_summary, "message_consistency_issues", []) or []
             except Exception:
                 issues = []
             for issue in issues:
@@ -753,7 +857,7 @@ def _display_commit_mappings(resolution_summary=None) -> None:
                 old_hash = commit.original_hash[:8]
                 new_hash = commit.resolved_hash[:8]
                 message = commit.message
-                submodule = commit.submodule_path
+                submodule = str(commit.submodule_path.relative_to(Path.cwd()))
             except Exception:
                 # If commit doesn't have expected attributes, skip rendering this row
                 continue
