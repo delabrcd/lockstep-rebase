@@ -96,7 +96,11 @@ def test_plan_rebase_include_exclude_filters(patched_env):
     with patch(
         "lockstep_rebase.rebase_orchestrator.GitManager",
         side_effect=make_git_manager_side_effect(root, order, existing),
-    ):
+    ) as GM:
+        # Attach patched GitManager mocks to each RepoInfo to avoid lazy init
+        for ri in order:
+            ri.git_manager = GM(ri.path)
+
         orch = RebaseOrchestrator(root_path=root.path)
 
         # Include only libA
@@ -122,7 +126,11 @@ def test_plan_rebase_branch_map_overrides(patched_env):
     with patch(
         "lockstep_rebase.rebase_orchestrator.GitManager",
         side_effect=make_git_manager_side_effect(root, order, existing),
-    ):
+    ) as GM:
+        # Attach patched GitManager mocks to each RepoInfo to avoid lazy init
+        for ri in order:
+            ri.git_manager = GM(ri.path)
+
         orch = RebaseOrchestrator(root_path=root.path)
 
         # Override libA to use source feat/altA and target trunk; others default
@@ -162,7 +170,11 @@ def test_plan_rebase_missing_branch_raises(patched_env):
     with patch(
         "lockstep_rebase.rebase_orchestrator.GitManager",
         side_effect=make_git_manager_side_effect(root, order, existing),
-    ):
+    ) as GM:
+        # Attach patched GitManager mocks to each RepoInfo to avoid lazy init
+        for ri in order:
+            ri.git_manager = GM(ri.path)
+
         orch = RebaseOrchestrator(root_path=root.path)
         with pytest.raises(RebaseError) as ei:
             orch.plan_rebase("feat/x", "main")

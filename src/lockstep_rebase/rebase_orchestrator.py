@@ -9,14 +9,23 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
 
-from .models import RebaseOperation, RebaseState, RepoInfo, RebaseError, HierarchyEntry, BackupEntry
-from .git_manager import GitManager
+from lockstep_rebase.conflict_resolver import ConflictResolver
+
+from .models import (
+    RebaseOperation,
+    RebaseState,
+    RepoInfo,
+    RebaseError,
+    HierarchyEntry,
+    BackupEntry,
+    ResolutionSummary,
+)
+from .git_manager import GitManager  # Expose for tests patching rebase_orchestrator.GitManager
 from .submodule_mapper import SubmoduleMapper
-from .commit_tracker import GlobalCommitTracker
-from .conflict_resolver import ConflictResolver
+from .commit_tracker import GlobalCommitTracker, CommitTracker
 from .prompt_interface import UserPrompt, NoOpPrompt, BranchSyncAction
 from .conflict_prompt_interface import ConflictPrompt
-from .backup_manager import BackupManager, BACKUP_PREFIX
+from .backup_manager import BACKUP_PREFIX
 
 
 logger = logging.getLogger(__name__)
@@ -30,21 +39,21 @@ class RebaseOrchestrator:
     ) -> None:
         """Initialize the rebase orchestrator."""
         self.root_path = root_path or Path.cwd()
-        self.git_manager = GitManager(self.root_path)
         self.submodule_mapper = SubmoduleMapper(self.root_path)
         self.global_tracker = GlobalCommitTracker()
-        self.conflict_resolver = ConflictResolver(
-            self.global_tracker, conflict_prompt
-        )
-        self.backup_manager = BackupManager()
 
-        # Discover repository hierarchy
-        self.root_repo_info = self.submodule_mapper.discover_repository_hierarchy()
+        # Support both new and legacy signatures for discover_repository_hierarchy.
+        # New: discover_repository_hierarchy(global_tracker, conflict_prompt)
+        # Legacy (used by some tests/mocks): discover_repository_hierarchy()
+        try:
+            self.root_repo_info = self.submodule_mapper.discover_repository_hierarchy(
+                self.global_tracker, conflict_prompt
+            )
+        except TypeError:
+            # Backward compatibility with mocks providing no-arg method
+            self.root_repo_info = self.submodule_mapper.discover_repository_hierarchy()
+
         logger.info(f"Initialized rebase orchestrator for {self.root_repo_info.name}")
-
-        # Initialize GitManager cache and populate from discovered hierarchy
-        self._git_manager_cache: Dict[Path, GitManager] = {self.root_path: self.git_manager}
-        self._init_git_manager_cache()
 
     def plan_rebase(
         self,
@@ -104,7 +113,7 @@ class RebaseOrchestrator:
         # Fetch remotes for all selected repositories up front (including submodules)
         for repo_info in selected:
             try:
-                gm = self._get_gm(repo_info.path)
+                gm = repo_info.git_manager
                 remotes = [r.name for r in gm.repo.remotes]
                 for rn in remotes:
                     try:
@@ -136,7 +145,7 @@ class RebaseOrchestrator:
         missing_tgt: list[str] = []
 
         for repo_info in selected:
-            gm = self._get_gm(repo_info.path)
+            gm = repo_info.git_manager
             src_br, tgt_br = _resolve_branches(repo_info)
 
             # Ensure source branch exists locally; if only remote exists, offer to create
@@ -211,8 +220,7 @@ class RebaseOrchestrator:
                             return
                         local_commit = gm.get_short_commit_for_ref(branch) or ""
                         remote_commit = (
-                            gm.get_short_commit_for_ref(f"{chosen_remote}/{branch}")
-                            or ""
+                            gm.get_short_commit_for_ref(f"{chosen_remote}/{branch}") or ""
                         )
                         action = prompt.confirm_sync_branch(
                             repo_info.name,
@@ -260,7 +268,9 @@ class RebaseOrchestrator:
 
         # Build rebase states
         for repo_info in selected:
-            gm = self._get_gm(repo_info.path)
+            gm = repo_info.git_manager
+            if not gm:
+                raise RebaseError(f"Missing GitManager for {repo_info.name} ({repo_info.path})")
             src_br, tgt_br = _resolve_branches(repo_info)
 
             original_commits = gm.get_commits_between(tgt_br, src_br)
@@ -340,7 +350,7 @@ class RebaseOrchestrator:
             Preference: if the parent's branch name exists in the submodule and is an exact match, use it.
             Otherwise, pick any branch (local or remote) whose tip equals the pointer commit.
             """
-            gm_sub = self._get_gm(sub_repo.path)
+            gm_sub = sub_repo.git_manager
 
             def pick(commit_sha: Optional[str], prefer: str) -> str:
                 if not commit_sha:
@@ -360,9 +370,7 @@ class RebaseOrchestrator:
                     try:
                         for r in gm_sub.repo.remotes:
                             if gm_sub.remote_branch_exists(prefer, r.name):
-                                head = gm_sub.get_short_commit_for_ref(
-                                    f"{r.name}/{prefer}"
-                                )
+                                head = gm_sub.get_short_commit_for_ref(f"{r.name}/{prefer}")
                                 if head == short_commit:
                                     return prefer
                     except Exception:
@@ -432,7 +440,7 @@ class RebaseOrchestrator:
 
         def process_parent(parent_info: RepoInfo, parent_src: str, parent_tgt: str) -> None:
             # Always include the parent repo itself
-            gm_parent = self._get_gm(parent_info.path)
+            gm_parent = parent_info.git_manager
 
             # Always fetch before checking sync or reading pointers
             try:
@@ -450,9 +458,7 @@ class RebaseOrchestrator:
                 if ahead == 0 and behind == 0:
                     return
                 local_commit = gm_parent.get_short_commit_for_ref(branch) or ""
-                remote_commit = (
-                    gm_parent.get_short_commit_for_ref(f"origin/{branch}") or ""
-                )
+                remote_commit = gm_parent.get_short_commit_for_ref(f"origin/{branch}") or ""
                 action = prompt.confirm_sync_branch(
                     parent_info.name, branch, local_commit, remote_commit, behind, ahead
                 )
@@ -501,12 +507,8 @@ class RebaseOrchestrator:
                 base_sha = gm_parent.repo.git.merge_base(src_ref, tgt_ref)
                 if base_sha:
                     both_changed = bool(
-                        gm_parent.submodule_changed_between(
-                            base_sha, src_ref, rel_path
-                        )
-                        and gm_parent.submodule_changed_between(
-                            base_sha, tgt_ref, rel_path
-                        )
+                        gm_parent.submodule_changed_between(base_sha, src_ref, rel_path)
+                        and gm_parent.submodule_changed_between(base_sha, tgt_ref, rel_path)
                     )
 
                 # Consider updated when the submodule pointer changed between target..source
@@ -526,7 +528,7 @@ class RebaseOrchestrator:
                 )
 
                 # Git manager for this submodule (used by helpers below)
-                gm_sub = self._get_gm(sm.path)
+                gm_sub = sm.git_manager
 
                 # Compute display variants without stripping remote prefix for user clarity
                 def _to_display(branch_name: str) -> str:
@@ -541,6 +543,7 @@ class RebaseOrchestrator:
                     except Exception:
                         pass
                     return branch_name
+
                 def _is_exact(branch_name: str, commit_sha: Optional[str]) -> bool:
                     if not commit_sha:
                         return False
@@ -555,9 +558,7 @@ class RebaseOrchestrator:
                         remotes = [r.name for r in gm_sub.repo.remotes]
                         for rn in remotes:
                             if gm_sub.remote_branch_exists(branch_name, rn):
-                                head_short = gm_sub.get_short_commit_for_ref(
-                                    f"{rn}/{branch_name}"
-                                )
+                                head_short = gm_sub.get_short_commit_for_ref(f"{rn}/{branch_name}")
                                 if head_short == short_commit:
                                     return True
                         return False
@@ -607,9 +608,7 @@ class RebaseOrchestrator:
                                 break
                         if chosen_remote:
                             if prompt.confirm_create_local_branch(sm.name, chosen, chosen_remote):
-                                gm_sub.create_local_branch_from_remote(
-                                    chosen, chosen_remote
-                                )
+                                gm_sub.create_local_branch_from_remote(chosen, chosen_remote)
                 except Exception as e:
                     logger.warning(f"Failed ensuring local branch exists for {sm.name}: {e}")
 
@@ -692,49 +691,70 @@ class RebaseOrchestrator:
 
         created = 0
         for state in operation.repo_states:
-            repo_path = state.repo.path
-            key = str(repo_path)
+            repo = state.repo
+            key = str(repo.path)
             if key in operation.backup_branches:
                 continue
+            if not repo.backup_manager:
+                raise RebaseError(f"Missing BackupManager for {repo.name} ({repo.path})")
             try:
-                backup_name = self.backup_manager.create_backup_branch(
-                    repo_path, state.source_branch, session_id=operation.backup_session_id
+                backup_name = repo.backup_manager.create_backup_branch(
+                    state.source_branch, session_id=operation.backup_session_id
                 )
                 operation.backup_branches[key] = backup_name
                 created += 1
             except Exception as e:
                 logger.error(
-                    f"Failed to create backup for {state.repo.name} ({state.source_branch}): {e}"
+                    f"Failed to create backup for {repo.name} ({state.source_branch}): {e}"
                 )
-                raise RebaseError(f"Failed to create backup branch in {state.repo.name}: {e}")
+                raise RebaseError(f"Failed to create backup branch in {repo.name}: {e}")
         logger.info(f"Created {created} backup branches for session {operation.backup_session_id}")
 
     def delete_backups(self, operation: RebaseOperation) -> int:
-        """Delete all backup branches recorded for this operation.
+        """Delete backup branches for this operation.
+
+        If a backup session id is present, delete all backups across the hierarchy for that session.
+        Otherwise, fall back to deleting only the operation-recorded backups.
 
         Returns number of deleted backups.
         """
+        # Prefer session-based deletion to ensure hierarchy-wide cleanup
+        if operation.backup_session_id:
+            deleted = self.delete_backups_by_session(operation.backup_session_id)
+            # Clear recorded branches to avoid double-deletion attempts
+            operation.backup_branches.clear()
+            return deleted
+
+        # Fallback: delete only the branches recorded on the operation
         deleted = 0
         for path_str, backup_name in list(operation.backup_branches.items()):
             try:
-                self.backup_manager.delete_backup_branch(Path(path_str), backup_name)
-                deleted += 1
-                del operation.backup_branches[path_str]
+                repo_info = self._get_repo_by_path_str(path_str)
+                if repo_info and repo_info.backup_manager:
+                    repo_info.backup_manager.delete_backup_branch(backup_name)
+                    deleted += 1
+                    del operation.backup_branches[path_str]
+                else:
+                    logger.warning(f"No repo/backup manager found for {path_str}; skipping delete")
             except Exception as e:
                 logger.error(f"Failed to delete backup {backup_name} in {path_str}: {e}")
         return deleted
 
     def list_backups_in_repo(self, repo_path: Optional[Path] = None) -> List[str]:
         """List backup branches in the specified or root repository."""
-        target = repo_path or self.root_path
-        return self.backup_manager.list_backup_branches(target)
+        repo = self._repo_for_path_or_root(repo_path)
+        if not repo.backup_manager:
+            return []
+        return repo.backup_manager.list_backup_branches()
 
     def list_parsed_backups_in_repo(
         self, repo_path: Optional[Path] = None, original_branch: Optional[str] = None
     ) -> List[BackupEntry]:
         """List structured backup entries in the specified or root repository."""
-        target = repo_path or self.root_path
-        return self.backup_manager.list_parsed_backups(target, original_branch=original_branch)
+        repo = self._repo_for_path_or_root(repo_path)
+        if not repo.backup_manager:
+            return []
+        return repo.backup_manager.list_parsed_backups(original_branch=original_branch)
 
     def list_backups_across_hierarchy(
         self, original_branch: Optional[str] = None
@@ -743,21 +763,39 @@ class RebaseOrchestrator:
         entries: List[BackupEntry] = []
         for repo_info in self._get_all_repositories(self.root_repo_info):
             try:
-                entries.extend(
-                    self.backup_manager.list_parsed_backups(
-                        repo_info.path, original_branch=original_branch
+                if repo_info.backup_manager:
+                    entries.extend(
+                        repo_info.backup_manager.list_parsed_backups(
+                            original_branch=original_branch
+                        )
                     )
-                )
             except Exception:
                 # Ignore repos that error on listing
                 continue
         return entries
 
+    def delete_backups_by_session(
+        self, session_id: str, original_branch: Optional[str] = None
+    ) -> int:
+        """Delete backups across the hierarchy filtered by session id (and optional original branch).
+
+        Returns number of deleted backups.
+        """
+        entries = self.list_backups_across_hierarchy(original_branch=original_branch)
+        targets = [e for e in entries if e.session == session_id]
+        deleted = 0
+        for e in targets:
+            if self.delete_backup_in_repo(e.backup_branch, e.repo_path):
+                deleted += 1
+        return deleted
+
     def delete_backup_in_repo(self, backup_branch: str, repo_path: Optional[Path] = None) -> bool:
         """Delete a specific backup branch in the given repository."""
-        target = repo_path or self.root_path
+        repo = self._repo_for_path_or_root(repo_path)
+        if not repo.backup_manager:
+            return False
         try:
-            self.backup_manager.delete_backup_branch(target, backup_branch)
+            repo.backup_manager.delete_backup_branch(backup_branch)
             return True
         except Exception:
             return False
@@ -774,22 +812,27 @@ class RebaseOrchestrator:
 
         Returns the backup branch name used on success, or None if no suitable backup found.
         """
-        target = repo_path or self.root_path
+        repo = self._repo_for_path_or_root(repo_path)
+        if not repo.backup_manager:
+            return None
         backup_name: Optional[str] = None
         if session_id:
             candidate = f"{BACKUP_PREFIX}/{original_branch}/{session_id}"
-            backups = self.backup_manager.list_backup_branches(target)
+            backups = repo.backup_manager.list_backup_branches()
             if candidate in backups:
                 backup_name = candidate
         else:
-            backup_name = self.backup_manager.get_latest_backup_for_original_branch(
-                target, original_branch
-            )
+            backup_name = repo.backup_manager.get_latest_backup_for_original_branch(original_branch)
 
         if not backup_name:
             return None
 
-        self.backup_manager.restore_branch_from_backup(target, original_branch, backup_name)
+        repo.backup_manager.restore_branch_from_backup(original_branch, backup_name)
+        # Ensure the restored branch is checked out to leave the repo in a clean state
+        try:
+            repo.git_manager.checkout_branch(original_branch)
+        except Exception as e:
+            logger.warning(f"Checked out restored branch failed in {repo.name} ({repo.path}): {e}")
         return backup_name
 
     def restore_original_branches_across_hierarchy(
@@ -800,7 +843,8 @@ class RebaseOrchestrator:
         Returns number of repositories restored.
         """
         restored = 0
-        for repo_info in self._get_all_repositories(self.root_repo_info):
+        # Restore bottom-up: lowest-level submodules first, then parents/root
+        for repo_info in self.submodule_mapper.get_rebase_order(self.root_repo_info):
             used = self.restore_original_branch_in_repo(
                 original_branch, repo_info.path, session_id=session_id
             )
@@ -812,7 +856,7 @@ class RebaseOrchestrator:
         """Execute rebase for a single repository."""
         logger.info(f"🔄 Rebasing {state.repo.name} ({state.repo.relative_path})")
 
-        git_manager = self._get_gm(state.repo.path)
+        git_manager = state.repo.git_manager
         repo_tracker = self.global_tracker.get_tracker(state.repo.name)
 
         try:
@@ -824,24 +868,28 @@ class RebaseOrchestrator:
 
             if success:
                 # Rebase completed without conflicts
-                return self._handle_successful_rebase(state, git_manager, repo_tracker, operation)
-            else:
+                return self._handle_successful_rebase(state, repo_tracker)
+
+            if conflict_files:
                 # Handle conflicts
                 return self._handle_rebase_conflicts(
-                    state, git_manager, repo_tracker, operation, conflict_files
+                    state,
+                    repo_tracker,
                 )
+
+            # Other error
+            logger.error(f"Failed to start rebase for {state.repo.name}")
+            return False
 
         except Exception as e:
             logger.error(f"Error during rebase of {state.repo.name}: {e}")
             return False
 
-    def _handle_successful_rebase(
-        self, state: RebaseState, git_manager: GitManager, repo_tracker, operation: RebaseOperation
-    ) -> bool:
+    def _handle_successful_rebase(self, state: RebaseState, repo_tracker: CommitTracker) -> bool:
         """Handle a rebase that completed without conflicts."""
         try:
             # Get updated commits
-            new_commits = git_manager.get_updated_commits(state.original_commits)
+            new_commits = state.repo.git_manager.get_updated_commits(state.original_commits)
 
             # Map old commits to new commits
             commit_mappings = repo_tracker.map_commits(state.original_commits, new_commits)
@@ -850,10 +898,6 @@ class RebaseOrchestrator:
             state.new_commits = new_commits
             state.commit_mapping = commit_mappings
             state.is_completed = True
-
-            # # Add to global mappings
-            # for old_hash, new_hash in commit_mappings.items():
-            #     operation.add_commit_mapping(old_hash, new_hash)
 
             logger.info(f"✅ Successfully rebased {state.repo.name}")
             return True
@@ -865,51 +909,50 @@ class RebaseOrchestrator:
     def _handle_rebase_conflicts(
         self,
         state: RebaseState,
-        git_manager: GitManager,
-        repo_tracker,
-        operation: RebaseOperation,
-        initial_conflict_files: List[str],
+        repo_tracker: CommitTracker,
     ) -> bool:
         """Handle rebase conflicts through resolution loop."""
         state.has_conflicts = True
 
         while True:
             # Analyze conflicts
-            conflicts = self.conflict_resolver.analyze_conflicts(state.repo.path)
 
-            if not conflicts["file_conflicts"] and not conflicts["submodule_conflicts"]:
+            file_conflicts, submodule_conflicts = state.repo.conflict_resolver.analyze_conflicts()
+
+            if not file_conflicts and not submodule_conflicts:
                 # No more conflicts, try to continue
-                success, new_conflicts = git_manager.continue_rebase()
+                success, new_conflicts = state.repo.git_manager.continue_rebase()
 
                 if success:
-                    # Rebase completed
-                    return self._handle_successful_rebase(
-                        state, git_manager, repo_tracker, operation
-                    )
-                elif new_conflicts:
-                    # More conflicts appeared
+                    return self._handle_successful_rebase(state, repo_tracker)
+
+                if new_conflicts:
                     continue
-                else:
-                    # Other error
-                    logger.error(f"Failed to continue rebase for {state.repo.name}")
-                    return False
+
+                # Other error
+                logger.error(f"Failed to continue rebase for {state.repo.name}")
+                return False
 
             # Try to auto-resolve submodule conflicts
             resolved_submodules, unresolved_submodules = [], []
-            if conflicts["submodule_conflicts"]:
+            if submodule_conflicts:
+                # get repoinfo list from submodule paths
+                sub_repos = [state.repo.get_submodule(conflict) for conflict in submodule_conflicts]
                 resolved_submodules, unresolved_submodules = (
-                    self.conflict_resolver.auto_resolve_submodule_conflicts(
-                        state.repo.path, conflicts["submodule_conflicts"]
-                    )
+                    state.repo.conflict_resolver.auto_resolve_submodule_conflicts(sub_repos)
+                )
+                logger.debug(
+                    f"Auto-resolved {len(resolved_submodules)} submodules and "
+                    f"{len(unresolved_submodules)} unresolved submodules"
                 )
 
             # Check if we still have unresolved conflicts
-            remaining_conflicts = conflicts["file_conflicts"] + unresolved_submodules
+            remaining_conflicts = file_conflicts + unresolved_submodules
 
             if remaining_conflicts:
                 # Prompt user for manual resolution
-                if not self.conflict_resolver.prompt_user_for_conflict_resolution(
-                    state.repo, conflicts["file_conflicts"], unresolved_submodules
+                if not state.repo.conflict_resolver.prompt_user_for_conflict_resolution(
+                    state.repo, file_conflicts, unresolved_submodules
                 ):
                     # User chose to abort
                     logger.info("User aborted rebase operation")
@@ -923,9 +966,8 @@ class RebaseOrchestrator:
 
         for state in operation.repo_states:
             try:
-                git_manager = self._get_gm(state.repo.path)
-                if git_manager.is_rebase_in_progress():
-                    git_manager.abort_rebase()
+                if state.repo.git_manager.is_rebase_in_progress():
+                    state.repo.git_manager.abort_rebase()
                     logger.info(f"Aborted rebase for {state.repo.name}")
             except Exception as e:
                 logger.error(f"Error cleaning up {state.repo.name}: {e}")
@@ -938,7 +980,7 @@ class RebaseOrchestrator:
 
         for repo_info in all_repos:
             try:
-                git_manager = self._get_gm(repo_info.path)
+                git_manager = repo_info.git_manager
                 current_branch = git_manager.get_current_branch()
                 is_rebasing = git_manager.is_rebase_in_progress()
 
@@ -961,35 +1003,47 @@ class RebaseOrchestrator:
             all_repos.extend(self._get_all_repositories(submodule))
         return all_repos
 
-    def _init_git_manager_cache(self) -> None:
-        """Populate the GitManager cache for all discovered repositories."""
-        try:
-            for repo_info in self._get_all_repositories(self.root_repo_info):
-                if repo_info.path not in self._git_manager_cache:
-                    self._git_manager_cache[repo_info.path] = GitManager(repo_info.path)
-        except Exception:
-            # Be resilient; fall back to lazy population
-            pass
+    def _repo_for_path_or_root(self, repo_path: Optional[Path]) -> RepoInfo:
+        """Resolve a RepoInfo for the given path, or return root if None.
 
-    def _get_gm(self, repo_path: Path) -> GitManager:
-        """Get a cached GitManager for the repo path, creating if necessary."""
-        gm = self._git_manager_cache.get(repo_path)
-        if gm is None:
-            gm = GitManager(repo_path)
-            self._git_manager_cache[repo_path] = gm
-        return gm
+        Raises RebaseError if no matching repository is found.
+        """
+        if repo_path is None:
+            return self.root_repo_info
+        target = Path(repo_path).resolve()
+        for ri in self._get_all_repositories(self.root_repo_info):
+            if ri.path == target:
+                return ri
+        raise RebaseError(f"Repository not found for path: {target}")
+
+    def _get_repo_by_path_str(self, path_str: str) -> Optional[RepoInfo]:
+        """Best-effort lookup of RepoInfo by a stringified path."""
+        try:
+            target = Path(path_str).resolve()
+        except Exception:
+            return None
+        for ri in self._get_all_repositories(self.root_repo_info):
+            if ri.path == target:
+                return ri
+        return None
 
     def get_repo_heirarchy(self) -> List[str]:
         """Return the discovered repository hierarchy as lines for CLI display."""
         return self.submodule_mapper.get_hierarchy_lines(self.root_repo_info)
 
-    def print_repository_hierarchy(self) -> List[str]:
-        """Backward-compatible wrapper to satisfy older callers/tests."""
-        return self.get_repo_heirarchy()
-
     def get_hierarchy_entries(self) -> List[HierarchyEntry]:
         """Return structured hierarchy entries for UI formatting."""
         return self.submodule_mapper.get_hierarchy_entries(self.root_repo_info)
+
+    def get_root_repo(self) -> RepoInfo:
+        return self.root_repo_info
+
+    def collect_resolution_summary(self) -> Dict[str, ResolutionSummary]:
+        all_repos = self._get_all_repositories(self.root_repo_info)
+        summaries = {}
+        for repo in all_repos:
+            summaries[repo.name] = repo.conflict_resolver.get_resolution_summary()
+        return summaries
 
     def validate_repository_state(self, prompt: UserPrompt = None) -> List[str]:
         """
@@ -1009,14 +1063,14 @@ class RebaseOrchestrator:
 
         for repo_info in all_repos:
             try:
-                git_manager = self._get_gm(repo_info.path)
+                git_manager = repo_info.git_manager
 
                 # Check for ongoing rebase
                 if git_manager.is_rebase_in_progress():
                     errors.append(f"{repo_info.name}: Rebase already in progress")
 
                 # Check for unstaged changes
-                if self.conflict_resolver.has_unstaged_changes(repo_info.path):
+                if repo_info.conflict_resolver.has_unstaged_changes(repo_info.path):
                     errors.append(f"{repo_info.name}: Has unstaged changes")
 
             except Exception as e:

@@ -184,6 +184,9 @@ def test_auto_plan_includes_changed_and_infers_branches(simple_hierarchy):
     ):
         orch = RebaseOrchestrator(root_path=root.path)
         prompt = StubPrompt()
+        # Attach mocked GitManager instances to each RepoInfo in the hierarchy
+        for ri in order:
+            ri.git_manager = gm_factory(ri.path)
         op = orch.plan_rebase_auto("feature/x", "main", prompt)
 
     names = {s.repo.name for s in op.repo_states}
@@ -222,6 +225,9 @@ def test_auto_plan_respects_prompt_overrides(simple_hierarchy):
         orch = RebaseOrchestrator(root_path=root.path)
         # Override suggested branches
         prompt = StubPrompt(override_src="ov/src", override_tgt="ov/tgt")
+        # Attach mocked GitManager instances to each RepoInfo
+        for ri in order:
+            ri.git_manager = gm_factory(ri.path)
         op = orch.plan_rebase_auto("src", "tgt", prompt)
 
     states = {s.repo.name: s for s in op.repo_states}
@@ -255,6 +261,9 @@ def test_auto_plan_applies_exclude_after_discovery(simple_hierarchy):
     ):
         orch = RebaseOrchestrator(root_path=root.path)
         prompt = StubPrompt()
+        # Attach mocked GitManager instances to each RepoInfo
+        for ri in order:
+            ri.git_manager = gm_factory(ri.path)
         op = orch.plan_rebase_auto("s", "t", prompt, exclude={"libA"})
 
     names = [s.repo.name for s in op.repo_states]
@@ -296,6 +305,9 @@ def test_auto_plan_recurses_into_nested(nested_hierarchy):
     ):
         orch = RebaseOrchestrator(root_path=root.path)
         prompt = StubPrompt()
+        # Attach mocked GitManager instances to each RepoInfo
+        for ri in order:
+            ri.git_manager = gm_factory(ri.path)
         op = orch.plan_rebase_auto("fsrc", "tgt", prompt)
 
     names = {s.repo.name for s in op.repo_states}
@@ -329,6 +341,9 @@ def test_branch_inference_ignores_detached_head(simple_hierarchy):
     ):
         orch = RebaseOrchestrator(root_path=root.path)
         prompt = StubPrompt()
+        # Attach mocked GitManager instances to each RepoInfo
+        for ri in order:
+            ri.git_manager = gm_factory(ri.path)
         op = orch.plan_rebase_auto("feature/x", "main", prompt)
 
     states = {s.repo.name: s for s in op.repo_states}
@@ -363,6 +378,9 @@ def test_branch_inference_skips_symbolic_remote_head(simple_hierarchy):
     ):
         orch = RebaseOrchestrator(root_path=root.path)
         prompt = StubPrompt()
+        # Attach mocked GitManager instances to each RepoInfo
+        for ri in order:
+            ri.git_manager = gm_factory(ri.path)
         op = orch.plan_rebase_auto("src", "tgt", prompt)
 
     states = {s.repo.name: s for s in op.repo_states}

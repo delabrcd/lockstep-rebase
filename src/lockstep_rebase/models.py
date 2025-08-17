@@ -6,7 +6,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # For type checkers only; avoids runtime circular import
+    from .git_manager import GitManager
+    from .backup_manager import BackupManager
+    from .conflict_resolver import ConflictResolver
 
 
 @dataclass
@@ -31,6 +37,9 @@ class RepoInfo:
     parent_repo: Optional[RepoInfo] = None
     submodules: List[RepoInfo] = field(default_factory=list)
     depth: int = 0
+    git_manager: Optional["GitManager"] = None
+    backup_manager: Optional["BackupManager"] = None
+    conflict_resolver: Optional["ConflictResolver"] = None
 
     def __post_init__(self) -> None:
         """Ensure path is absolute."""
@@ -43,6 +52,12 @@ class RepoInfo:
             return str(self.path.relative_to(Path.cwd()))
         except ValueError:
             return str(self.path)
+
+    def get_submodule(self, name: str) -> Optional[RepoInfo]:
+        for submodule in self.submodules:
+            if submodule.name == name:
+                return submodule
+        return None
 
 
 @dataclass
@@ -81,6 +96,13 @@ class RebaseOperation:
         return None
 
 
+@dataclass
+class SubmoduleConflict:
+    main_git_manager: GitManager
+    subby_git_manager: GitManager
+    main_commit: CommitInfo
+
+
 class RebaseError(Exception):
     """Base exception for rebase operations."""
 
@@ -112,14 +134,14 @@ class ResolvedCommit:
     original_hash: str
     resolved_hash: str
     message: str
-    submodule_path: str
+    submodule_path: Path
 
 
 @dataclass
 class ResolutionSummary:
     """Summary of all conflict resolutions."""
 
-    resolved_commits_by_repo: Dict[str, List[ResolvedCommit]] = field(default_factory=dict)
+    resolved_commits: List[ResolvedCommit] = field(default_factory=list)
     message_consistency_issues: List[str] = field(default_factory=list)
 
 

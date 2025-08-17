@@ -7,12 +7,15 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional
-
-from git import Repo, InvalidGitRepositoryError
+from git import Repo
 
 from .models import RepoInfo, SubmoduleError, HierarchyEntry
+from .backup_manager import BackupManager
 from .prompt_interface import UserPrompt, NoOpPrompt, BranchSyncAction
 from .git_manager import GitManager
+from .conflict_resolver import ConflictResolver
+from .commit_tracker import GlobalCommitTracker
+from .conflict_prompt_interface import ConflictPrompt
 
 
 logger = logging.getLogger(__name__)
@@ -21,22 +24,26 @@ logger = logging.getLogger(__name__)
 class SubmoduleMapper:
     """Maps and manages Git submodule hierarchies."""
 
-    def __init__(self, root_repo_path: Path) -> None:
-        """Initialize with root repository path."""
+    def __init__(
+        self,
+        root_repo_path: Path,
+    ) -> None:
+        """Initialize with root repository path.
+
+        Args:
+            root_repo_path: Path to the root git repository
+
+        Notes:
+            GitManager instances are owned by `RepoInfo` objects and are attached during
+            discovery. No separate GitManager cache or provider is used.
+        """
         self.root_repo_path = Path(root_repo_path).resolve()
-        self._repo_cache: Dict[Path, Repo] = {}
 
-    def _get_repo(self, repo_path: Path) -> Repo:
-        """Get or create a cached Repo instance."""
-        repo_path = repo_path.resolve()
-        if repo_path not in self._repo_cache:
-            try:
-                self._repo_cache[repo_path] = Repo(repo_path)
-            except InvalidGitRepositoryError as e:
-                raise SubmoduleError(f"Invalid Git repository at {repo_path}") from e
-        return self._repo_cache[repo_path]
+    # No GitManager cache/provider: a GitManager is owned by RepoInfo
 
-    def discover_repository_hierarchy(self) -> RepoInfo:
+    def discover_repository_hierarchy(
+        self, global_tracker: GlobalCommitTracker, conflict_prompt: ConflictPrompt
+    ) -> RepoInfo:
         """
         Discover the complete repository hierarchy starting from root.
 
@@ -44,14 +51,22 @@ class SubmoduleMapper:
             RepoInfo tree with all submodules mapped
         """
         try:
-            root_repo = self._get_repo(self.root_repo_path)
+            root_gm = GitManager(self.root_repo_path)
             root_info = RepoInfo(
-                path=self.root_repo_path, name=self.root_repo_path.name, is_submodule=False, depth=0
+                path=self.root_repo_path,
+                name=self.root_repo_path.name,
+                is_submodule=False,
+                depth=0,
+                git_manager=root_gm,
+                backup_manager=BackupManager(root_gm),
+                conflict_resolver=ConflictResolver(
+                    global_tracker,
+                    conflict_prompt,
+                    root_gm,
+                ),
             )
 
-            # Recursively discover submodules
-            self._discover_submodules_recursive(root_info, root_repo)
-
+            self._discover_submodules_recursive(root_info, global_tracker, conflict_prompt)
             logger.info(
                 f"Discovered repository hierarchy with {self._count_repos(root_info)} repositories"
             )
@@ -61,15 +76,19 @@ class SubmoduleMapper:
             logger.error(f"Error discovering repository hierarchy: {e}")
             raise SubmoduleError(f"Failed to discover repository hierarchy: {e}")
 
-    def _discover_submodules_recursive(self, parent_info: RepoInfo, parent_repo: Repo) -> None:
+    def _discover_submodules_recursive(
+        self,
+        parent_info: RepoInfo,
+        global_tracker: GlobalCommitTracker,
+        conflict_prompt: ConflictPrompt,
+    ) -> None:
         """Recursively discover submodules for a repository."""
         try:
-            # Get submodules from .gitmodules file
-            if not hasattr(parent_repo, "submodules"):
+            if not hasattr(parent_info.git_manager.repo, "submodules"):
                 return
 
-            for submodule in parent_repo.submodules:
-                submodule_path = Path(parent_repo.working_dir) / submodule.path
+            for submodule in parent_info.git_manager.repo.submodules:
+                submodule_path = Path(parent_info.git_manager.repo.working_dir) / submodule.path
 
                 # Skip if submodule directory doesn't exist or isn't initialized
                 if not submodule_path.exists() or not (submodule_path / ".git").exists():
@@ -79,19 +98,25 @@ class SubmoduleMapper:
                     continue
 
                 try:
-                    submodule_repo = self._get_repo(submodule_path)
+                    gm = GitManager(submodule_path)
                     submodule_info = RepoInfo(
                         path=submodule_path,
                         name=submodule.name,
                         is_submodule=True,
                         parent_repo=parent_info,
                         depth=parent_info.depth + 1,
+                        git_manager=gm,
+                        backup_manager=BackupManager(gm),
+                        conflict_resolver=ConflictResolver(
+                            global_tracker,
+                            conflict_prompt,
+                            gm,
+                        ),
                     )
-
                     parent_info.submodules.append(submodule_info)
 
                     # Recursively discover nested submodules
-                    self._discover_submodules_recursive(submodule_info, submodule_repo)
+                    self._discover_submodules_recursive(submodule_info, global_tracker, conflict_prompt)
 
                     logger.debug(
                         f"Discovered submodule: {submodule_info.name} at depth {submodule_info.depth}"
@@ -177,7 +202,7 @@ class SubmoduleMapper:
 
         for repo_info in all_repos:
             try:
-                repo = self._get_repo(repo_info.path)
+                repo = repo_info.git_manager.repo
 
                 # Check and handle source branch
                 source_result = self._check_and_handle_branch(
@@ -217,7 +242,11 @@ class SubmoduleMapper:
         result = {"exists": False, "sync_issue": None}
 
         try:
-            gm = GitManager(Path(repo.working_dir))
+            # Prefer the RepoInfo-owned GitManager; as a fallback (should be rare), create and attach
+            gm = repo_info.git_manager
+            if gm is None:
+                gm = GitManager(Path(repo.working_dir))
+                repo_info.git_manager = gm
             # Check if branch exists locally / remotely via GitManager
             local_exists = gm.branch_exists(branch_name)
             remote_exists = gm.remote_branch_exists(branch_name, "origin")
@@ -264,25 +293,7 @@ class SubmoduleMapper:
             logger.error(f"Error checking branch {branch_name} in {repo_info.name}: {e}")
             return result
 
-    def _branch_exists_locally(self, repo: Repo, branch_name: str) -> bool:
-        """Check if a branch exists locally (delegates to GitManager)."""
-        try:
-            gm = GitManager(Path(repo.working_dir))
-            return gm.branch_exists(branch_name)
-        except Exception as e:
-            logger.debug(f"Error checking local branches: {e}")
-            return False
-
-    def _branch_exists_remotely(
-        self, repo: Repo, branch_name: str, remote_name: str = "origin"
-    ) -> bool:
-        """Check if a branch exists on remote (delegates to GitManager)."""
-        try:
-            gm = GitManager(Path(repo.working_dir))
-            return gm.remote_branch_exists(branch_name, remote_name)
-        except Exception as e:
-            logger.debug(f"Error checking remote branches: {e}")
-            return False
+    # Removed helpers that could instantiate duplicate GitManagers via a cache
 
     def _check_branch_sync(
         self, repo: Repo, branch_name: str, remote_name: str = "origin"
@@ -334,22 +345,7 @@ class SubmoduleMapper:
             logger.error(f"Error syncing branch {branch_name}: {e}")
             raise
 
-    def _create_local_branch_from_remote(
-        self, repo: Repo, branch_name: str, remote_name: str = "origin"
-    ) -> None:
-        """Create a local branch from a remote-tracking branch (delegates to GitManager)."""
-        try:
-            gm = GitManager(Path(repo.working_dir))
-            gm.create_local_branch_from_remote(branch_name, remote_name)
-        except Exception as e:
-            logger.error(f"Error creating local branch {branch_name}: {e}")
-            raise
-
-    def _branch_exists(self, repo: Repo, branch_name: str) -> bool:
-        """Check if a branch exists in the repository (local or remote)."""
-        return self._branch_exists_locally(repo, branch_name) or self._branch_exists_remotely(
-            repo, branch_name
-        )
+    # Branch existence helpers removed; use GitManager on RepoInfo directly when needed
 
     def _get_all_repositories(self, root_info: RepoInfo) -> List[RepoInfo]:
         """Get a flat list of all repositories in the hierarchy."""

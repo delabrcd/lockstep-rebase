@@ -5,11 +5,10 @@ Git repository management and operations.
 from __future__ import annotations
 
 import logging
-import os
-import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple
 from git import Repo, InvalidGitRepositoryError
+from git.exc import GitCommandError
 
 from .models import CommitInfo, GitRepositoryError, RepoInfo
 
@@ -36,6 +35,7 @@ class GitManager:
         """Discover the Git repository from current or specified path."""
         search_path = self.repo_path
 
+        logger.debug(f"Discovering repository in: {search_path}")
         # Walk up the directory tree to find a Git repository
         while search_path != search_path.parent:
             try:
@@ -59,7 +59,7 @@ class GitManager:
         repo_path = Path(self.repo.working_dir)
         repo_name = repo_path.name
         is_submodule = self._is_submodule(repo_path)
-        return RepoInfo(path=repo_path, name=repo_name, is_submodule=is_submodule)
+        return RepoInfo(path=repo_path, name=repo_name, is_submodule=is_submodule, git_manager=self)
 
     def _is_submodule(self, repo_path: Path) -> bool:
         """Check if a repository is a submodule."""
@@ -218,36 +218,25 @@ class GitManager:
         """
         try:
             working_dir = Path(self.repo.working_dir)
-
-            # Start the rebase
-            result = subprocess.run(
-                ["git", "rebase", target_branch], cwd=working_dir, capture_output=True, text=True
-            )
-
             logger.debug(f"Called 'git rebase {target_branch}' in {working_dir}")
+            # Execute rebase via GitPython; errors raise GitCommandError
+            self.repo.git.rebase(target_branch)
 
-            if result.returncode == 0:
-                # Verify index/working tree are clean before declaring success
-                if not self.is_index_clean():
-                    dirty = self.get_dirty_paths()
-                    logger.error(f"Rebase completed but index is dirty: {dirty}")
-                    raise GitRepositoryError("Rebase left repository with a dirty index")
-                logger.info("Rebase completed successfully")
-                return True, []
-            else:
-                # Check for conflicts
-                conflict_files = self._get_conflict_files()
-                if conflict_files:
-                    logger.warning(f"Rebase has conflicts in files: {conflict_files}")
-                    return False, conflict_files
-                else:
-                    # Other error
-                    logger.error(f"Rebase failed: {result.stderr}")
-                    raise GitRepositoryError(f"Rebase failed: {result.stderr}")
-
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Git rebase command failed: {e}")
-            raise GitRepositoryError(f"Git rebase command failed: {e}")
+            # Verify index/working tree are clean before declaring success
+            if not self.is_index_clean():
+                dirty = self.get_dirty_paths()
+                logger.error(f"Rebase completed but index is dirty: {dirty}")
+                raise GitRepositoryError("Rebase left repository with a dirty index")
+            logger.info("Rebase completed successfully")
+            return True, []
+        except GitCommandError as e:
+            # Check for conflicts
+            conflict_files = self._get_conflict_files()
+            if conflict_files:
+                logger.warning(f"Rebase has conflicts in files: {conflict_files}")
+                return False, conflict_files
+            logger.error(f"Rebase failed: {e}")
+            raise GitRepositoryError(f"Rebase failed: {e}")
         except Exception as e:
             logger.error(f"Error during rebase: {e}")
             raise GitRepositoryError(f"Error during rebase: {e}")
@@ -255,17 +244,8 @@ class GitManager:
     def _get_conflict_files(self) -> List[str]:
         """Get list of files with merge conflicts."""
         try:
-            result = subprocess.run(
-                ["git", "diff", "--name-only", "--diff-filter=U"],
-                cwd=Path(self.repo.working_dir),
-                capture_output=True,
-                text=True,
-            )
-
-            if result.returncode == 0:
-                return [f.strip() for f in result.stdout.split("\n") if f.strip()]
-            else:
-                return []
+            output = self.repo.git.diff("--name-only", "--diff-filter=U")
+            return [f.strip() for f in output.split("\n") if f.strip()]
         except Exception as e:
             logger.error(f"Error getting conflict files: {e}")
             return []
@@ -280,38 +260,25 @@ class GitManager:
     def continue_rebase(self) -> Tuple[bool, List[str]]:
         """Continue a rebase after conflicts are resolved."""
         try:
-            working_dir = Path(self.repo.working_dir)
+            # Avoid interactive editor prompt
+            with self.repo.git.custom_environment(GIT_EDITOR="true"):
+                self.repo.git.rebase("--continue")
 
-            # Set environment to avoid interactive commit message prompts
-            env = os.environ.copy()
-            env["GIT_EDITOR"] = "true"
-
-            result = subprocess.run(
-                ["git", "rebase", "--continue"],
-                cwd=working_dir,
-                capture_output=True,
-                text=True,
-                env=env,
-            )
-
-            if result.returncode == 0:
-                # Verify index/working tree are clean before declaring success
-                if not self.is_index_clean():
-                    dirty = self.get_dirty_paths()
-                    logger.error(f"Rebase continued but index is dirty: {dirty}")
-                    raise GitRepositoryError("Rebase continue left repository with a dirty index")
-                logger.info("Rebase continued successfully")
-                return True, []
-            else:
-                # Check for more conflicts
-                conflict_files = self._get_conflict_files()
-                if conflict_files:
-                    logger.warning(f"Rebase still has conflicts: {conflict_files}")
-                    return False, conflict_files
-                else:
-                    logger.error(f"Rebase continue failed: {result.stderr}")
-                    raise GitRepositoryError(f"Rebase continue failed: {result.stderr}")
-
+            # Verify index/working tree are clean before declaring success
+            if not self.is_index_clean():
+                dirty = self.get_dirty_paths()
+                logger.error(f"Rebase continued but index is dirty: {dirty}")
+                raise GitRepositoryError("Rebase continue left repository with a dirty index")
+            logger.info("Rebase continued successfully")
+            return True, []
+        except GitCommandError as e:
+            # Check for more conflicts
+            conflict_files = self._get_conflict_files()
+            if conflict_files:
+                logger.warning(f"Rebase still has conflicts: {conflict_files}")
+                return False, conflict_files
+            logger.error(f"Rebase continue failed: {e}")
+            raise GitRepositoryError(f"Rebase continue failed: {e}")
         except Exception as e:
             logger.error(f"Error continuing rebase: {e}")
             raise GitRepositoryError(f"Error continuing rebase: {e}")
@@ -319,12 +286,9 @@ class GitManager:
     def abort_rebase(self) -> None:
         """Abort a rebase operation."""
         try:
-            working_dir = Path(self.repo.working_dir)
-
-            subprocess.run(["git", "rebase", "--abort"], cwd=working_dir, check=True)
-
+            self.repo.git.rebase("--abort")
             logger.info("Rebase aborted successfully")
-        except subprocess.CalledProcessError as e:
+        except GitCommandError as e:
             logger.error(f"Failed to abort rebase: {e}")
             raise GitRepositoryError(f"Failed to abort rebase: {e}")
 
@@ -384,17 +348,11 @@ class GitManager:
         Each entry is a dict with keys: stage, hash, path
         """
         try:
-            result = subprocess.run(
-                ["git", "ls-files", "-u", "--", path],
-                cwd=Path(self.repo.working_dir),
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            if not result.stdout.strip():
+            output = self.repo.git.ls_files("-u", "--", path)
+            if not output.strip():
                 return []
             entries: List[dict] = []
-            for line in result.stdout.strip().split("\n"):
+            for line in output.strip().split("\n"):
                 parts = line.split("\t")
                 if len(parts) >= 2:
                     mode_hash = parts[0].split()
@@ -405,46 +363,63 @@ class GitManager:
                             "path": parts[1],
                         })
             return entries
-        except subprocess.CalledProcessError:
-            return []
         except Exception:
             return []
 
     def checkout_commit(self, commitish: str) -> None:
         """Checkout a commit-ish in the specified repository path."""
         try:
-            working_dir = Path(self.repo.working_dir)
-            subprocess.run(["git", "checkout", commitish], cwd=working_dir, check=True, capture_output=True)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to checkout {commitish} in {working_dir}: {e}")
+            self.repo.git.checkout(commitish)
+        except GitCommandError as e:
+            logger.error(f"Failed to checkout {commitish} in {self.repo.working_dir}: {e}")
             raise GitRepositoryError(f"Failed to checkout {commitish}: {e}")
 
     def add_paths(self, paths: List[str]) -> None:
         """Stage the given paths in the specified repository path."""
         try:
-            working_dir = Path(self.repo.working_dir)
-            for p in paths:
-                subprocess.run(["git", "add", p], cwd=working_dir, check=True, capture_output=True)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to add paths {paths} in {working_dir}: {e}")
+            # Use porcelain 'git add -- <path>' for better handling of gitlinks (submodules)
+            str_paths = [str(p) for p in paths]
+            for p in str_paths:
+                # The '--' ensures pathspec is not interpreted as an option
+                self.repo.git.add("--", p)
+            # Refresh index to ensure merge state/index entries are updated
+            try:
+                self.repo.git.update_index("--refresh")
+            except Exception:
+                # Non-fatal; continue even if refresh is unsupported in this context
+                pass
+        except Exception as e:
+            logger.error(f"Failed to add paths {paths} in {self.repo.working_dir}: {e}")
             raise GitRepositoryError(f"Failed to stage paths: {e}")
 
     def get_commit_subject(self, commit_hash: str) -> Optional[str]:
         """Return the one-line subject for a commit hash in the given repo."""
+        # Primary: GitPython commit object
         try:
-            working_dir = Path(self.repo.working_dir)
-            result = subprocess.run(
-                ["git", "log", "-1", "--format=%s", commit_hash],
-                cwd=working_dir,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            return result.stdout.strip()
-        except subprocess.CalledProcessError:
-            return None
+            subj = self.repo.commit(commit_hash).summary
+            return subj.strip() if subj else None
         except Exception:
-            return None
+            pass
+
+        # Fallback 1: porcelain 'git show -s --format=%s <hash>'
+        try:
+            output = self.repo.git.show("-s", "--format=%s", commit_hash)
+            output = output.strip()
+            if output:
+                return output
+        except Exception:
+            pass
+
+        # Fallback 2: porcelain 'git log -1 --format=%s <hash>'
+        try:
+            output = self.repo.git.log("-1", "--format=%s", commit_hash)
+            output = output.strip()
+            if output:
+                return output
+        except Exception:
+            pass
+
+        return None
 
     def get_short_commit_for_ref(self, ref: str) -> Optional[str]:
         """Return the short commit hash for a given ref name (branch, tag, or remote ref).
@@ -452,47 +427,24 @@ class GitManager:
         Example refs: 'main', 'feature/x', 'origin/main', 'HEAD'.
         """
         try:
-            working_dir = Path(self.repo.working_dir)
-            result = subprocess.run(
-                ["git", "rev-parse", "--short", ref],
-                cwd=working_dir,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            value = result.stdout.strip()
+            value = self.repo.git.rev_parse("--short", ref).strip()
             return value if value else None
-        except subprocess.CalledProcessError:
-            return None
         except Exception:
             return None
 
     def get_staged_files(self) -> List[str]:
         """Return list of staged (cached) paths (names only)."""
         try:
-            working_dir = Path(self.repo.working_dir)
-            result = subprocess.run(
-                ["git", "diff", "--cached", "--name-only"],
-                cwd=working_dir,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            return [f.strip() for f in result.stdout.split("\n") if f.strip()]
-        except subprocess.CalledProcessError:
-            return []
+            output = self.repo.git.diff("--cached", "--name-only")
+            return [f.strip() for f in output.split("\n") if f.strip()]
         except Exception:
             return []
 
     def has_unstaged_changes(self) -> bool:
         """Return True if there are unstaged changes in the working tree."""
         try:
-            working_dir = Path(self.repo.working_dir)
-            # Use --quiet for efficiency; returncode 1 means changes present
-            result = subprocess.run(
-                ["git", "diff", "--quiet"], cwd=working_dir
-            )
-            return result.returncode != 0
+            # Only consider unstaged changes (ignore index and untracked files)
+            return self.repo.is_dirty(index=False, working_tree=True, untracked_files=False)
         except Exception:
             return False
 
@@ -509,17 +461,9 @@ class GitManager:
             The gitlink SHA (40-hex) if present, otherwise None.
         """
         try:
-            working_dir = Path(self.repo.working_dir)
             # Use ls-tree to read the tree entry; gitlink mode is 160000 and type 'commit'
-            result = subprocess.run(
-                ["git", "ls-tree", branch, "--", submodule_path],
-                cwd=working_dir,
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                return None
-            line = result.stdout.strip()
+            output = self.repo.git.ls_tree(branch, "--", submodule_path)
+            line = output.strip()
             if not line:
                 return None
             # Expected format: "160000 commit <sha>\t<path>"
@@ -540,25 +484,14 @@ class GitManager:
         any commits that touched the gitlink entry.
         """
         try:
-            working_dir = Path(self.repo.working_dir)
-            result = subprocess.run(
-                [
-                    "git",
-                    "log",
-                    "--pretty=format:",
-                    "--name-only",
-                    f"{base_branch}..{feature_branch}",
-                    "--",
-                    submodule_path,
-                ],
-                cwd=working_dir,
-                capture_output=True,
-                text=True,
+            output = self.repo.git.log(
+                "--pretty=format:",
+                "--name-only",
+                f"{base_branch}..{feature_branch}",
+                "--",
+                submodule_path,
             )
-            if result.returncode != 0:
-                return False
-            # If any path is listed, the submodule entry was changed in that range
-            touched = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
+            touched = [ln.strip() for ln in output.splitlines() if ln.strip()]
             return len(touched) > 0
         except Exception as e:
             logger.error(
@@ -628,10 +561,9 @@ class GitManager:
     def fetch_remote(self, remote_name: str = "origin") -> None:
         """Fetch updates from a remote."""
         try:
-            working_dir = Path(self.repo.working_dir)
-            subprocess.run(["git", "fetch", "--prune", remote_name], cwd=working_dir, check=True)
-            logger.info(f"Fetched updates from {remote_name} in {working_dir}")
-        except subprocess.CalledProcessError as e:
+            self.repo.remotes[remote_name].fetch(prune=True)
+            logger.info(f"Fetched updates from {remote_name} in {self.repo.working_dir}")
+        except Exception as e:
             logger.error(f"Failed to fetch from {remote_name}: {e}")
             raise GitRepositoryError(f"Failed to fetch from {remote_name}: {e}")
 
@@ -641,30 +573,15 @@ class GitManager:
         If the remote ref does not exist, returns (0, 0).
         """
         try:
-            working_dir = Path(self.repo.working_dir)
             remote_ref = f"{remote_name}/{branch_name}"
             # If remote ref doesn't exist, treat as in sync for our purposes
             try:
-                Repo(working_dir).remotes[remote_name].refs
+                _ = self.repo.remotes[remote_name].refs
             except Exception:
                 return 0, 0
 
-            # rev-list --left-right --count remote...local => left=behind, right=ahead
-            result = subprocess.run(
-                [
-                    "git",
-                    "rev-list",
-                    "--left-right",
-                    "--count",
-                    f"{remote_ref}...{branch_name}",
-                ],
-                cwd=working_dir,
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                return 0, 0
-            left_right = result.stdout.strip().split()
+            output = self.repo.git.rev_list("--left-right", "--count", f"{remote_ref}...{branch_name}")
+            left_right = output.strip().split()
             if len(left_right) != 2:
                 return 0, 0
             behind = int(left_right[0])
@@ -685,23 +602,21 @@ class GitManager:
         the remote ref. Otherwise, force-moves the branch ref to the remote tip.
         """
         try:
-            working_dir = Path(self.repo.working_dir)
             remote_ref = f"{remote_name}/{branch_name}"
-            temp_repo = Repo(working_dir)
             current_branch = None
             try:
-                current_branch = temp_repo.active_branch.name
+                current_branch = self.repo.active_branch.name
             except Exception:
                 current_branch = None
 
             if current_branch == branch_name:
                 # Checked out: use ff-only merge
-                subprocess.run(["git", "merge", "--ff-only", remote_ref], cwd=working_dir, check=True)
+                self.repo.git.merge("--ff-only", remote_ref)
             else:
                 # Move branch ref to remote tip
-                temp_repo.git.branch("-f", branch_name, remote_ref)
+                self.repo.git.branch("-f", branch_name, remote_ref)
             logger.info(f"Fast-forwarded {branch_name} to {remote_ref}")
-        except subprocess.CalledProcessError as e:
+        except GitCommandError as e:
             logger.error(f"Failed to fast-forward {branch_name}: {e}")
             raise GitRepositoryError(f"Failed to fast-forward {branch_name}: {e}")
         except Exception as e:
@@ -712,18 +627,11 @@ class GitManager:
     def is_index_clean(self) -> bool:
         """Return True if there are no staged or unstaged changes (untracked ignored)."""
         try:
-            working_dir = Path(self.repo.working_dir)
-            # No unstaged changes
-            res_wt = subprocess.run(["git", "diff", "--quiet"], cwd=working_dir)
-            if res_wt.returncode != 0:
-                return False
-            # No staged changes
-            res_idx = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=working_dir)
-            if res_idx.returncode != 0:
+            # No staged or unstaged changes; ignore untracked files
+            if self.repo.is_dirty(index=True, working_tree=True, untracked_files=False):
                 return False
             # No unresolved merges
-            res_unmerged = subprocess.run(["git", "ls-files", "-u"], cwd=working_dir, capture_output=True, text=True)
-            if res_unmerged.stdout.strip():
+            if self.repo.git.ls_files("-u").strip():
                 return False
             return True
         except Exception:
@@ -732,14 +640,9 @@ class GitManager:
     def get_dirty_paths(self) -> List[str]:
         """Return list of paths that are staged or unstaged (untracked ignored)."""
         try:
-            working_dir = Path(self.repo.working_dir)
-            result = subprocess.run(
-                ["git", "status", "--porcelain"], cwd=working_dir, capture_output=True, text=True
-            )
-            if result.returncode != 0:
-                return []
+            output = self.repo.git.status("--porcelain")
             dirty: List[str] = []
-            for line in result.stdout.splitlines():
+            for line in output.splitlines():
                 if not line.strip():
                     continue
                 # First two columns are status codes; path follows
