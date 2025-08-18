@@ -52,9 +52,12 @@ class SubmoduleMapper:
         """
         try:
             root_gm = GitManager(self.root_repo_path)
+            # Always anchor the root info at the discovered repository root,
+            # even if the user invoked from a nested subdirectory.
+            root_working_dir = Path(root_gm.repo.working_dir)
             root_info = RepoInfo(
-                path=self.root_repo_path,
-                name=self.root_repo_path.name,
+                path=root_working_dir,
+                name=root_working_dir.name,
                 is_submodule=False,
                 depth=0,
                 git_manager=root_gm,

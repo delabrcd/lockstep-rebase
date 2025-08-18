@@ -81,10 +81,25 @@ class ConflictResolver:
         unresolved = []
 
         for submodule in conflicted_submodules:
-            if self._resolve_submodule_conflict(submodule):
-                resolved.append(submodule.path)
-            else:
-                unresolved.append(submodule.path)
+            # Defensive: tolerate None or unexpected entries to avoid crashes
+            if submodule is None:
+                logger.warning(
+                    "auto_resolve_submodule_conflicts received a None entry; skipping"
+                )
+                unresolved.append("<unknown-submodule>")
+                continue
+
+            try:
+                if self._resolve_submodule_conflict(submodule):
+                    resolved.append(submodule.path)
+                else:
+                    unresolved.append(submodule.path)
+            except Exception as e:
+                logger.error(f"Error while resolving submodule conflict entry: {e}")
+                try:
+                    unresolved.append(getattr(submodule, "path", "<unknown-submodule>"))
+                except Exception:
+                    unresolved.append("<unknown-submodule>")
 
         return resolved, unresolved
 
@@ -97,7 +112,6 @@ class ConflictResolver:
         """
         try:
             gm_parent = self.git_manager
-
 
             entries = gm_parent.get_unmerged_index_entries(submodule.path)
             if not entries:

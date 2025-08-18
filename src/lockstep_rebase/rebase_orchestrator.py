@@ -38,7 +38,11 @@ class RebaseOrchestrator:
         self, root_path: Optional[Path] = None, conflict_prompt: ConflictPrompt = None
     ) -> None:
         """Initialize the rebase orchestrator."""
-        self.root_path = root_path or Path.cwd()
+        # Normalize provided path (or cwd) to absolute to avoid relative path issues
+        self.root_path = (root_path or Path.cwd()).resolve()
+        logger.debug(
+            f"RebaseOrchestrator initialized with root_path={self.root_path} cwd={Path.cwd()}"
+        )
         self.submodule_mapper = SubmoduleMapper(self.root_path)
         self.global_tracker = GlobalCommitTracker()
 
@@ -444,7 +448,13 @@ class RebaseOrchestrator:
 
             # Always fetch before checking sync or reading pointers
             try:
-                gm_parent.fetch_remote("origin")
+                # Fetch all remotes to ensure up-to-date pointers for comparison
+                remotes = [r.name for r in gm_parent.repo.remotes]
+                for rn in remotes:
+                    try:
+                        gm_parent.fetch_remote(rn)
+                    except Exception as fe:
+                        logger.warning(f"Failed to fetch {rn} for {parent_info.name}: {fe}")
             except Exception as e:
                 logger.warning(f"Failed to fetch origin for {parent_info.name}: {e}")
 
@@ -484,25 +494,97 @@ class RebaseOrchestrator:
                     f"Remote sync prompt in auto-planning failed for {parent_info.name}: {e}"
                 )
 
-            # Resolve refs for reading pointers (use remote ref if local branch missing)
+            # Resolve refs for reading pointers (prefer a remote ref if local is missing or behind)
             def _ref_for_reading(branch: str) -> str:
-                if gm_parent.branch_exists(branch):
+                try:
+                    remotes = [r.name for r in gm_parent.repo.remotes]
+                except Exception:
+                    remotes = []
+
+                # Prefer 'origin' order
+                sorted_remotes = sorted(remotes, key=lambda n: (n != "origin", n))
+
+                local_exists = gm_parent.branch_exists(branch)
+
+                # If local exists, but is behind a remote, use the remote ref for read-only comparisons
+                if local_exists:
+                    for rn in sorted_remotes:
+                        if gm_parent.remote_branch_exists(branch, rn):
+                            ahead, behind = gm_parent.branch_ahead_behind(branch, rn)
+                            if behind > 0 and ahead == 0:
+                                return f"{rn}/{branch}"
+                            break  # We checked the preferred remote; fall back to local
                     return branch
-                if gm_parent.remote_branch_exists(branch, "origin"):
-                    return f"origin/{branch}"
+
+                # No local branch: if any remote has it, use that remote ref
+                for rn in sorted_remotes:
+                    if gm_parent.remote_branch_exists(branch, rn):
+                        return f"{rn}/{branch}"
+                # Fallback: return branch as-is (may be a detached or tag ref)
                 return branch
 
             src_ref = _ref_for_reading(parent_src)
             tgt_ref = _ref_for_reading(parent_tgt)
+            logger.debug(
+                f"Parent {parent_info.name}: using refs src_ref={src_ref}, tgt_ref={tgt_ref} for submodule pointer comparison"
+            )
 
             for sm in parent_info.submodules:
+                # Compute the submodule path relative to the parent's repo root (POSIX).
+                # Prefer GitManager normalization when available; fall back to manual logic for test mocks.
+                rel_path: str
+                used_gm_normalization = False
                 try:
-                    rel_path = str(sm.path.relative_to(parent_info.path))
+                    # Use GitManager's normalization if present (real implementation)
+                    maybe_rel = gm_parent._to_repo_relative_str(sm.path)  # type: ignore[attr-defined]
+                    if isinstance(maybe_rel, str) and maybe_rel:
+                        rel_path = maybe_rel
+                        used_gm_normalization = True
+                    else:
+                        raise TypeError("to_repo_relative_str did not return str")
                 except Exception:
-                    rel_path = sm.name
+                    # Manual fallback compatible with MagicMock GitManager in tests
+                    try:
+                        base_root = Path(gm_parent.repo.working_dir)
+                    except Exception:
+                        base_root = parent_info.path
+
+                    try:
+                        rel_path = str(Path(sm.path).resolve().relative_to(base_root)).replace("\\", "/")
+                    except Exception:
+                        # Fallback: try relative to parent_info.path (may be same as base_root)
+                        try:
+                            rel_path = (
+                                str(Path(sm.path).resolve().relative_to(parent_info.path)).replace("\\", "/")
+                            )
+                        except Exception:
+                            # Final fallback to submodule name
+                            rel_path = sm.name
+
+                if used_gm_normalization:
+                    logger.debug(
+                        f"Parent {parent_info.name}: computed submodule rel_path='{rel_path}' via GitManager normalization (sm.path='{sm.path}')"
+                    )
+                else:
+                    logger.debug(
+                        f"Parent {parent_info.name}: computed submodule rel_path='{rel_path}' from base_root='{base_root}' (sm.path='{sm.path}')"
+                    )
+
+                # Read the submodule pointers at each end
+                src_sha = gm_parent.get_submodule_pointer_at(src_ref, rel_path)
+                tgt_sha = gm_parent.get_submodule_pointer_at(tgt_ref, rel_path)
+                logger.debug(
+                    f"Parent {parent_info.name}: submodule {rel_path} pointers src({src_ref})={src_sha} tgt({tgt_ref})={tgt_sha}"
+                )
+
+                # Determine if the submodule pointer differs between source and target
+                # Include when the pointers are not equal (including None vs SHA differences)
+                if src_sha == tgt_sha:
+                    # No update for this submodule in parent between the two refs
+                    continue
 
                 # Detect if submodule changed on both branches (relative to merge-base) to annotate suggestions.
-                # We avoid a second prompt here to keep UX to a single include prompt.
+                # This is informational only (do not gate inclusion on this).
                 both_changed = False
                 base_sha = gm_parent.repo.git.merge_base(src_ref, tgt_ref)
                 if base_sha:
@@ -510,17 +592,12 @@ class RebaseOrchestrator:
                         gm_parent.submodule_changed_between(base_sha, src_ref, rel_path)
                         and gm_parent.submodule_changed_between(base_sha, tgt_ref, rel_path)
                     )
-
-                # Consider updated when the submodule pointer changed between target..source
-                if not both_changed:
-                    continue
+                logger.debug(
+                    f"Parent {parent_info.name}: submodule {rel_path} merge-base={base_sha}, both_changed={both_changed}"
+                )
 
                 # Include this parent since it has a changed submodule pointer
                 record_repo(parent_info)
-
-                # Get the pointers at each end for context and inference
-                src_sha = gm_parent.get_submodule_pointer_at(src_ref, rel_path)
-                tgt_sha = gm_parent.get_submodule_pointer_at(tgt_ref, rel_path)
 
                 # Infer suggested branches for the submodule
                 sugg_src, sugg_tgt = infer_branches_for_submodule(
@@ -530,16 +607,17 @@ class RebaseOrchestrator:
                 # Git manager for this submodule (used by helpers below)
                 gm_sub = sm.git_manager
 
-                # Compute display variants without stripping remote prefix for user clarity
+                # Compute display variants; prefer local branch names, fall back to remote-qualified
                 def _to_display(branch_name: str) -> str:
                     try:
-                        # Prefer showing remote-qualified name if any remote has it (prefer 'origin')
+                        # Prefer local branch if it exists
+                        if gm_sub.branch_exists(branch_name):
+                            return branch_name
+                        # Otherwise, show remote-qualified (prefer 'origin') if available
                         remotes = [r.name for r in gm_sub.repo.remotes]
                         for rn in sorted(remotes, key=lambda n: (n != "origin", n)):
                             if gm_sub.remote_branch_exists(branch_name, rn):
                                 return f"{rn}/{branch_name}"
-                        if gm_sub.branch_exists(branch_name):
-                            return branch_name
                     except Exception:
                         pass
                     return branch_name
@@ -936,11 +1014,47 @@ class RebaseOrchestrator:
             # Try to auto-resolve submodule conflicts
             resolved_submodules, unresolved_submodules = [], []
             if submodule_conflicts:
-                # get repoinfo list from submodule paths
-                sub_repos = [state.repo.get_submodule(conflict) for conflict in submodule_conflicts]
+                # Map conflicted submodule paths to RepoInfo instances.
+                # Conflicts are reported as filesystem paths; prefer exact path match and
+                # fall back to direct child name matching. Filter out any Nones to avoid
+                # NoneType errors in the resolver, but keep track of unmapped paths so
+                # the user can resolve them manually.
+                mapped_sub_repos = []
+                unmapped_conflicts = []
+                for conflict in submodule_conflicts:
+                    try:
+                        path_str = str(conflict)
+                    except Exception:
+                        path_str = f"{conflict}"
+
+                    ri = self._get_repo_by_path_str(path_str)
+                    if ri is None:
+                        # Fallback: try name match against direct child submodule
+                        try:
+                            name = Path(path_str).name
+                        except Exception:
+                            name = path_str
+                        ri = state.repo.get_submodule(name)
+
+                    if ri is not None:
+                        mapped_sub_repos.append(ri)
+                    else:
+                        unmapped_conflicts.append(path_str)
+
                 resolved_submodules, unresolved_submodules = (
-                    state.repo.conflict_resolver.auto_resolve_submodule_conflicts(sub_repos)
+                    state.repo.conflict_resolver.auto_resolve_submodule_conflicts(mapped_sub_repos)
                 )
+
+                # Ensure unmapped paths are surfaced for manual resolution
+                if unmapped_conflicts:
+                    unresolved_submodules.extend(unmapped_conflicts)
+                    logger.warning(
+                        "Encountered %d submodule conflict(s) that could not be mapped to known submodules; "
+                        "left for manual resolution: %s",
+                        len(unmapped_conflicts),
+                        unmapped_conflicts,
+                    )
+
                 logger.debug(
                     f"Auto-resolved {len(resolved_submodules)} submodules and "
                     f"{len(unresolved_submodules)} unresolved submodules"
