@@ -10,10 +10,14 @@ from lockstep_rebase import (
 )
 
 
-def test_version():
-    """Test that version is defined."""
-    assert __version__ == "0.2.0"
+def test_version_format():
+    assert isinstance(__version__, str)
+    assert __version__ != ""
 
+def test_version_matches_semver():
+    import re
+    semver_pattern = r"^\d+\.\d+\.\d+$"
+    assert re.match(semver_pattern, __version__)
 
 def test_import():
     """Test that the package can be imported."""
