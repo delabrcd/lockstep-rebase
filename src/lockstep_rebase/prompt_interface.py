@@ -121,6 +121,23 @@ class UserPrompt(ABC):
         pass
 
     @abstractmethod
+    def confirm_force_push(
+        self, repo_name: str, branch_name: str, remote_name: str = "origin"
+    ) -> bool:
+        """
+        Require explicit typed confirmation before executing a destructive force push.
+
+        Args:
+            repo_name: Name of the repository
+            branch_name: Name of the branch to push
+            remote_name: Name of the remote (default: origin)
+
+        Returns:
+            True if user typed the exact confirmation phrase, False otherwise.
+        """
+        pass
+
+    @abstractmethod
     def show_validation_summary(
         self, missing_branches: Dict[str, List[str]], sync_issues: Dict[str, Dict[str, str]]
     ) -> None:
@@ -176,3 +193,8 @@ class NoOpPrompt(UserPrompt):
 
     def choose_submodule_branches(self, submodule_repo: str, default_src: str, default_tgt: str) -> Tuple[str, str]:
         return default_src, default_tgt
+
+    def confirm_force_push(
+        self, repo_name: str, branch_name: str, remote_name: str = "origin"
+    ) -> bool:
+        return False

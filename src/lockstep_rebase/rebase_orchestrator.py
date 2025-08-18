@@ -788,19 +788,79 @@ class RebaseOrchestrator:
                 raise RebaseError(f"Failed to create backup branch in {repo.name}: {e}")
         logger.info(f"Created {created} backup branches for session {operation.backup_session_id}")
 
+    def maybe_force_push(
+        self,
+        operation: RebaseOperation,
+        prompt: UserPrompt = None,
+        *,
+        remote_name: str = "origin",
+    ) -> None:
+        """Prompt and optionally force-push completed repo branches to the remote.
+
+        Intended to be called by the CLI after a successful local rebase so the
+        user is clearly informed before being asked to push.
+        """
+        if prompt is None:
+            prompt = NoOpPrompt()
+
+        for state in operation.repo_states:
+            try:
+                if not state.is_completed:
+                    continue
+
+                repo_name = state.repo.name
+                branch = state.source_branch
+                gm = state.repo.git_manager
+
+                # Best-effort ahead/behind info
+                try:
+                    ahead, behind = gm.branch_ahead_behind(branch, remote_name)
+                except Exception:
+                    ahead, behind = 0, 0
+
+                if behind > 0:
+                    logger.warning(
+                        f"{repo_name}/{branch} is behind {remote_name}/{branch} by {behind} commit(s); a force push may overwrite remote history."
+                    )
+                elif ahead > 0:
+                    logger.info(
+                        f"{repo_name}/{branch} is ahead of {remote_name}/{branch} by {ahead} commit(s); pushing will update remote."
+                    )
+
+                if prompt.confirm_force_push(repo_name, branch, remote_name):
+                    try:
+                        gm.force_push(branch, remote_name=remote_name, with_lease=True)
+                        logger.info(
+                            f"🚀 Force-pushed {repo_name}:{branch} to {remote_name}/{branch}"
+                        )
+                    except Exception as pe:
+                        logger.error(
+                            f"Force push failed for {repo_name}:{branch} -> {remote_name}: {pe}"
+                        )
+                else:
+                    logger.info(
+                        f"⏭️  Skipping force push for {repo_name}:{branch} (no confirmation)"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Error during post-rebase push handling for {state.repo.name}: {e}"
+                )
+
     def delete_backups(self, operation: RebaseOperation) -> int:
-        """Delete backup branches for this operation.
+        """Delete backup branches created for this operation.
 
-        If a backup session id is present, delete all backups across the hierarchy for that session.
-        Otherwise, fall back to deleting only the operation-recorded backups.
+        If a backup session id is present, delete all backups across the hierarchy for that
+        session. Otherwise, delete only the branches recorded on the operation.
 
-        Returns number of deleted backups.
+        Returns the number of deleted backups.
         """
         # Prefer session-based deletion to ensure hierarchy-wide cleanup
         if operation.backup_session_id:
-            deleted = self.delete_backups_by_session(operation.backup_session_id)
-            # Clear recorded branches to avoid double-deletion attempts
-            operation.backup_branches.clear()
+            try:
+                deleted = self.delete_backups_by_session(operation.backup_session_id)
+            finally:
+                # Clear recorded branches to avoid double-deletion attempts
+                operation.backup_branches.clear()
             return deleted
 
         # Fallback: delete only the branches recorded on the operation
@@ -813,7 +873,9 @@ class RebaseOrchestrator:
                     deleted += 1
                     del operation.backup_branches[path_str]
                 else:
-                    logger.warning(f"No repo/backup manager found for {path_str}; skipping delete")
+                    logger.warning(
+                        f"No repo/backup manager found for {path_str}; skipping delete"
+                    )
             except Exception as e:
                 logger.error(f"Failed to delete backup {backup_name} in {path_str}: {e}")
         return deleted
