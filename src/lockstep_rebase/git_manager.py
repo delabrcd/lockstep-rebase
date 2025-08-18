@@ -657,6 +657,78 @@ class GitManager:
             logger.error(f"Error fast-forwarding {branch_name}: {e}")
             raise GitRepositoryError(f"Error fast-forwarding {branch_name}: {e}")
 
+    def force_push(
+        self,
+        branch_name: str,
+        remote_name: str = "origin",
+        with_lease: bool = True,
+        set_upstream_if_missing: bool = True,
+    ) -> None:
+        """Force push a local branch to its remote.
+
+        Uses --force-with-lease by default for safety, falling back to --force
+        if the remote does not support lease or if the lease check fails due to
+        environment constraints. Explicitly pushes "<branch>:<branch>" to avoid
+        reliance on upstream configuration.
+
+        Args:
+            branch_name: Local branch name to push
+            remote_name: Remote name (default: origin)
+            with_lease: Use --force-with-lease when possible (default: True)
+            set_upstream_if_missing: Include -u on push if the branch has no tracking branch
+        """
+        try:
+            temp_repo = self.repo
+            # Validate remote exists
+            _ = temp_repo.remotes[remote_name]
+
+            # Determine whether to set upstream (-u) for this branch
+            use_u = False
+            if set_upstream_if_missing:
+                try:
+                    head = next(h for h in temp_repo.heads if h.name == branch_name)
+                    tracking = head.tracking_branch()
+                    use_u = tracking is None
+                except Exception:
+                    use_u = False
+
+            refspec = f"{branch_name}:{branch_name}"
+            common_args: list[str] = []
+            if use_u:
+                common_args.append("-u")
+
+            # Prefer --force-with-lease for safety
+            try:
+                if with_lease:
+                    logger.info(
+                        f"Pushing {branch_name} to {remote_name}/{branch_name} with --force-with-lease"
+                    )
+                    temp_repo.git.push(remote_name, refspec, "--force-with-lease", *common_args)
+                else:
+                    logger.info(
+                        f"Pushing {branch_name} to {remote_name}/{branch_name} with --force"
+                    )
+                    temp_repo.git.push(remote_name, refspec, "--force", *common_args)
+            except GitCommandError as e:
+                if with_lease:
+                    # Fallback to plain --force if lease not supported or fails
+                    logger.warning(
+                        f"--force-with-lease failed for {branch_name} -> {remote_name}. Falling back to --force: {e}"
+                    )
+                    temp_repo.git.push(remote_name, refspec, "--force", *common_args)
+                else:
+                    raise
+
+            logger.info(
+                f"Force push completed: {branch_name} -> {remote_name}/{branch_name}"
+            )
+        except GitCommandError as e:
+            logger.error(f"Force push failed for {branch_name} to {remote_name}: {e}")
+            raise GitRepositoryError(f"Force push failed for {branch_name} to {remote_name}: {e}")
+        except Exception as e:
+            logger.error(f"Error during force push: {e}")
+            raise GitRepositoryError(f"Error during force push: {e}")
+
     # --- Working tree / index cleanliness ---
     def is_index_clean(self) -> bool:
         """Return True if there are no staged or unstaged changes (untracked ignored)."""

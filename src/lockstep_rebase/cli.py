@@ -49,6 +49,55 @@ def _default_log_path() -> Path:
     return base / "lockstep-rebase.log"
 
 
+class SafeConsoleFormatter(logging.Formatter):
+    """Formatter that replaces characters not encodable by the target console encoding.
+
+    This prevents UnicodeEncodeError on Windows terminals using legacy code pages (e.g., cp1252)
+    when log messages include emoji or other non-representable characters. File handlers keep
+    full UTF-8 output; only console output is sanitized.
+    """
+
+    def __init__(self, fmt: Optional[str] = None, datefmt: Optional[str] = None, style: str = "%", encoding: Optional[str] = None):
+        super().__init__(fmt=fmt, datefmt=datefmt, style=style)
+        self.encoding = encoding or getattr(sys.stderr, "encoding", None) or "utf-8"
+
+    def format(self, record: logging.LogRecord) -> str:
+        msg = super().format(record)
+        try:
+            msg.encode(self.encoding, errors="strict")
+            return msg
+        except Exception:
+            # Replace unencodable characters for display only
+            return msg.encode(self.encoding, errors="replace").decode(self.encoding, errors="replace")
+
+
+class SafeConsoleFilter(logging.Filter):
+    """Sanitize record messages for console by replacing unencodable characters.
+
+    This runs before handler emission and is effective with RichHandler which may
+    bypass standard formatters for message text.
+    """
+
+    def __init__(self, encoding: Optional[str] = None):
+        super().__init__()
+        self.encoding = encoding or getattr(sys.stderr, "encoding", None) or "utf-8"
+
+    def filter(self, record: logging.LogRecord) -> bool:  # always keep the record
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        try:
+            message.encode(self.encoding, errors="strict")
+            return True
+        except Exception:
+            safe = message.encode(self.encoding, errors="replace").decode(self.encoding, errors="replace")
+            # Replace the message and clear args to avoid double formatting
+            record.msg = safe
+            record.args = ()
+            return True
+
+
 def setup_logging(verbose: bool = False, console_level: Optional[str] = None, log_file: Optional[Path] = None) -> Path:
     """Setup logging with per-run file + stable aggregate, fully cross-platform:
     - Per-run log file: <stem>-YYYYMMDD_HHMMSS.log (non-rotating)
@@ -120,7 +169,14 @@ def setup_logging(verbose: bool = False, console_level: Optional[str] = None, lo
         ch_level = level_map.get((console_level or "info").lower(), logging.INFO)
         console_handler = RichHandler(console=console, rich_tracebacks=True)
         console_handler.setLevel(ch_level)
-        console_handler.setFormatter(logging.Formatter("%(message)s"))
+        # Determine console stream encoding and sanitize messages for display
+        try:
+            stream = getattr(console, "file", sys.stderr)
+            enc = getattr(stream, "encoding", None) or getattr(sys.stderr, "encoding", None) or "utf-8"
+        except Exception:
+            enc = getattr(sys.stderr, "encoding", None) or "utf-8"
+        console_handler.setFormatter(SafeConsoleFormatter("%(message)s", encoding=enc))
+        console_handler.addFilter(SafeConsoleFilter(encoding=enc))
         root.addHandler(console_handler)
 
     # Choose the most convenient path to present to the user
@@ -210,6 +266,11 @@ def cli(ctx: click.Context, verbose: bool, log_level: Optional[str], repo_path: 
     multiple=True,
     help="Per-repo branch mapping: repo=SRC[:TGT]. Repeatable.",
 )
+@click.option(
+    "--offer-force-push",
+    is_flag=True,
+    help="After successful rebase, offer to force push updated local branches to origin (requires typed confirmation).",
+)
 @click.pass_context
 def rebase(
     ctx: click.Context,
@@ -221,6 +282,7 @@ def rebase(
     includes: tuple[str, ...],
     excludes: tuple[str, ...],
     branch_map_items: tuple[str, ...],
+    offer_force_push: bool,
 ) -> None:
     """
     Rebase SOURCE_BRANCH onto TARGET_BRANCH across all submodules.
@@ -323,6 +385,10 @@ def rebase(
         resolution_summary = orchestrator.collect_resolution_summary()
         # Show commit mappings with auto-resolved commits organized by repository
         _display_commit_mappings(resolution_summary)
+
+        # Optionally offer to force push updated branches with explicit confirmation
+        if offer_force_push:
+            orchestrator.maybe_force_push(operation, prompt)
 
         # Prompt to delete backups
         # Prefer showing the count across the hierarchy for the current session

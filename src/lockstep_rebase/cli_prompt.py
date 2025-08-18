@@ -149,3 +149,32 @@ class CliPrompt(UserPrompt):
         src = click.prompt("Source branch", default=default_src, show_default=True)
         tgt = click.prompt("Target branch", default=default_tgt, show_default=True)
         return src.strip(), tgt.strip()
+
+    def confirm_force_push(
+        self, repo_name: str, branch_name: str, remote_name: str = "origin"
+    ) -> bool:
+        """Require the user to type 'FORCE PUSH' to confirm destructive push."""
+        phrase = "FORCE PUSH"
+        panel = Panel(
+            f"[bold red]Destructive operation ahead[/bold red]\n\n"
+            f"Repository: [cyan]{repo_name}[/cyan]\n"
+            f"Branch: [green]{branch_name}[/green] → Remote: [yellow]{remote_name}[/yellow]\n\n"
+            "This will overwrite the remote branch history.\n"
+            f"To confirm, type [bold]{phrase}[/bold] exactly.",
+            title="Confirm Force Push",
+            border_style="red",
+        )
+        self.console.print(panel)
+
+        try:
+            entered = click.prompt(
+                "Type the exact confirmation phrase", default="", show_default=False
+            )
+        except (click.Abort, KeyboardInterrupt):
+            return False
+
+        if entered.strip() == phrase:
+            return True
+
+        self.console.print("Confirmation phrase did not match. Skipping force push.", style="yellow")
+        return False
