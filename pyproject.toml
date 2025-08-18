@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lockstep-rebase"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A tool for rebasing Git repositories with submodules in lockstep"
 authors = [
     {name = "delabrcd", email = "delabrcd@users.noreply.github.com"},
@@ -44,10 +44,13 @@ where = ["src"]
 [tool.setuptools.package-dir]
 "" = "src"
 
+[tool.setuptools.dynamic]
+version = {attr = "lockstep_rebase.__version__"}
+
 [tool.black]
 line-length = 100
 target-version = ['py38']
-include = '\.pyi?$'
+include = '\\.pyi?$'
 
 [tool.ruff]
 line-length = 100
