@@ -1,18 +1,36 @@
 # Lockstep Rebase
 
-A professional-grade Python tool for rebasing Git repositories with tightly coupled submodules in lockstep. This tool handles complex multi-level submodule hierarchies, automatically tracks commit hash changes, and provides intelligent conflict resolution.
+[![CI](https://github.com/delabrcd/lockstep-rebase/actions/workflows/ci.yml/badge.svg)](https://github.com/delabrcd/lockstep-rebase/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)
+![OS](https://img.shields.io/badge/os-linux%20%7C%20macOS%20%7C%20windows-lightgrey)
+[![License: MIT](https://img.shields.io/github/license/delabrcd/lockstep-rebase)](LICENSE)
+
+A Python CLI tool for rebasing Git repositories with tightly coupled submodules in lockstep. It handles multi-level submodule hierarchies, tracks commit hash changes, and provides conflict resolution helpers.
 
 ## Features
 
 - **🔍 Automatic Repository Discovery**: Detects Git repositories and maps submodule hierarchies
 - **📋 Smart Rebase Planning**: Plans rebase operations across all repositories in dependency order
 - **🔄 Commit Tracking**: Tracks commit hash changes during rebases for submodule resolution
-- **⚡ Intelligent Conflict Resolution**: Auto-resolves submodule conflicts using commit mappings
-- **🛡️ Safe Operations**: Validates repository state before operations and provides rollback
-- **📊 Rich CLI Interface**: Beautiful command-line interface with progress tracking
+- **⚡ Conflict Resolution Aids**: Auto-resolves submodule conflicts using commit mappings; prompts for file conflicts
+- **🧹 Session-Based Backups (Hierarchy-Wide)**: Create, list, delete, and restore backup branches across all repos in a session. Interactive session picker and optional filtering by original branch.
+- **📊 CLI UX**: Helpful output with structured hierarchy views and progress messages
 - **🔧 Cross-Platform**: Works on Windows, macOS, and Linux
 
 ## Installation
+
+### Directly from GitHub (source install)
+```bash
+pip install --upgrade pip
+pip install git+https://github.com/delabrcd/lockstep-rebase.git
+```
+
+Tip (Linux/macOS): pip may place console scripts in `~/.local/bin`.
+Add to PATH if needed:
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
 
 ### From Source
 ```bash
@@ -135,6 +153,48 @@ Tip: Use --dry-run to preview the discovered plan.
 Notes:
 - Identifiers for `--include`, `--exclude`, and `--branch-map` keys can be repo name, relative path from root, or absolute path.
 - `--branch-map` format is `repo=SRC[:TGT]`. If `:TGT` is omitted, the global target branch is used for that repo.
+
+## Logging
+
+- Console logging is disabled by default. Enable with `-v/--verbose` or `--log-level {debug,info,warning,error}`.
+- Logs are always written to a rotating file (default: `~/.lockstep-rebase/lockstep-rebase.log`). Override with `LOCKSTEP_REBASE_LOG`.
+- On startup, the CLI prints a short notice indicating where logs are written and how to enable console logs.
+
+## Backups: list, delete, restore
+
+Backup branches are created per rebase session with names like `lockstep/backup/{original_branch}/{session_id}`.
+
+- **List backups across the hierarchy**
+  ```bash
+  lockstep-rebase backups list [--original-branch BR] [--session-id S] [--latest] [--repo-path PATH]
+  ```
+
+- **Delete backups across the hierarchy**
+  - Interactive picker (default):
+    ```bash
+    lockstep-rebase backups delete
+    ```
+  - Latest session:
+    ```bash
+    lockstep-rebase backups delete --latest
+    ```
+  - Specific session:
+    ```bash
+    lockstep-rebase backups delete --session-id S
+    ```
+  - Filter by original branch: add `--original-branch BR`
+  - Per-repo deletion: add `--repo-path PATH` and use `--all` or `--branch <name>` to target branches in that repo
+
+- **Restore backups**
+  - Restore all backups from a session:
+    ```bash
+    lockstep-rebase backups restore --session-id S
+    lockstep-rebase backups restore --latest
+    ```
+  - Restore a single original branch:
+    ```bash
+    lockstep-rebase backups restore <original-branch> [--session-id S | --latest]
+    ```
 
 ## How It Works
 
@@ -267,19 +327,6 @@ flake8
 mypy src/lockstep_rebase
 ```
 
-### Project Structure
-```
-src/lockstep_rebase/
-├── __init__.py              # Package initialization
-├── cli.py                   # Command-line interface
-├── models.py                # Data models and exceptions
-├── git_manager.py           # Git operations wrapper
-├── submodule_mapper.py      # Repository hierarchy discovery
-├── commit_tracker.py        # Commit hash tracking
-├── conflict_resolver.py     # Conflict resolution logic
-└── rebase_orchestrator.py   # Main orchestration logic
-```
-
 ## Troubleshooting
 
 ### Common Issues
@@ -321,13 +368,16 @@ lockstep-rebase --verbose <command>
 5. Ensure all tests pass
 6. Submit a pull request
 
+## Safety and Disclaimer
+
+This project is largely AI-generated and not thoroughly tested. Rebasing and submodule operations can be destructive. Use at your own risk.
+
+Recommendations:
+- Work on disposable clones or branches.
+- Commit or stash your changes before running.
+- Use `--dry-run` to preview plans.
+- Verify results and keep your own backups.
+
 ## License
 
 MIT License - see LICENSE file for details.
-
-## Support
-
-For issues, feature requests, or questions:
-- Create an issue on GitHub
-- Check existing issues for solutions
-- Use verbose mode for detailed error information
