@@ -22,9 +22,19 @@ from .rebase_orchestrator import RebaseOrchestrator
 from .cli_prompt import CliPrompt
 from .cli_conflict_prompt import CliConflictPrompt
 from .models import RebaseError, ResolutionSummary
+from . import __version__ as PACKAGE_VERSION
 
 
 console = Console()
+logger = logging.getLogger(__name__)
+
+
+def _print_version(ctx, param, value):
+    """Eager option callback to print version and exit."""
+    if not value or ctx.resilient_parsing:
+        return
+    click.echo(f"lockstep-rebase {PACKAGE_VERSION}")
+    ctx.exit()
 
 
 def _default_log_path() -> Path:
@@ -131,6 +141,15 @@ def _maybe_print_log_notice(verbose: bool, console_level: Optional[str], log_pat
 
 
 @click.group()
+@click.option(
+    "--version",
+    "-V",
+    is_flag=True,
+    callback=_print_version,
+    expose_value=False,
+    is_eager=True,
+    help="Show version and exit.",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose console logging (INFO)")
 @click.option(
     "--log-level",
@@ -152,7 +171,14 @@ def cli(ctx: click.Context, verbose: bool, log_level: Optional[str], repo_path: 
     ctx.obj["verbose"] = verbose
     ctx.obj["console_level"] = log_level
     ctx.obj["log_path"] = log_path
-    ctx.obj["repo_path"] = repo_path
+    normalized_repo = repo_path.resolve() if isinstance(repo_path, Path) else None
+    ctx.obj["repo_path"] = normalized_repo
+    try:
+        logger.debug(
+            f"CLI init: cwd={Path.cwd()} repo_path_in={repo_path} normalized_repo={normalized_repo}"
+        )
+    except Exception:
+        pass
 
 
 @cli.command()
@@ -321,14 +347,20 @@ def rebase(
 
     except RebaseError as e:
         console.print(f"\n❌ **Rebase Error:** {e}", style="bold red")
+        # Debug stack trace to file logs for diagnostics
+        logger.debug("Rebase aborted due to RebaseError", exc_info=True)
         sys.exit(1)
     except (click.Abort, KeyboardInterrupt):
         console.print("\n\n🚫 **Operation cancelled by user**", style="bold yellow")
+        # Debug stack trace for cancellation context
+        logger.debug("Operation cancelled by user", exc_info=True)
         sys.exit(130)
     except Exception as e:
         console.print(f"\n💥 **Unexpected Error:** {e}", style="bold red")
         if ctx.obj.get("verbose"):
             console.print_exception()
+        # Debug stack trace to file logs for diagnostics
+        logger.debug("Unexpected error during rebase", exc_info=True)
         sys.exit(1)
 
 
@@ -411,6 +443,8 @@ def backups_list(
             console.print(session_tree)
     except Exception as e:
         console.print(f"\n❌ **Error listing backups:** {e}", style="bold red")
+        # Debug stack trace to file logs for diagnostics
+        logger.debug("Error in backups list", exc_info=True)
         sys.exit(1)
 
 
@@ -572,6 +606,8 @@ def backups_delete(
         console.print(f"🧹 Deleted {count} backup branch(es)")
     except Exception as e:
         console.print(f"\n❌ **Error deleting backups:** {e}", style="bold red")
+        # Debug stack trace to file logs for diagnostics
+        logger.debug("Error in backups delete", exc_info=True)
         sys.exit(1)
 
 
@@ -645,6 +681,8 @@ def backups_restore(
             console.print(f"✅ Restored original branch in {restored} repos")
     except Exception as e:
         console.print(f"\n❌ **Error restoring backups:** {e}", style="bold red")
+        # Debug stack trace to file logs for diagnostics
+        logger.debug("Error in backups restore", exc_info=True)
         sys.exit(1)
 
 
@@ -691,6 +729,8 @@ def status(ctx: click.Context) -> None:
 
     except Exception as e:
         console.print(f"\n❌ **Error getting status:** {e}", style="bold red")
+        # Debug stack trace to file logs for diagnostics
+        logger.debug("Error in status command", exc_info=True)
         sys.exit(1)
 
 
@@ -742,6 +782,8 @@ def hierarchy(ctx: click.Context) -> None:
 
     except Exception as e:
         console.print(f"\n❌ **Error displaying hierarchy:** {e}", style="bold red")
+        # Debug stack trace to file logs for diagnostics
+        logger.debug("Error in hierarchy command", exc_info=True)
         sys.exit(1)
 
 
@@ -780,7 +822,15 @@ def validate(ctx: click.Context, source_branch: str, target_branch: str) -> None
 
     except Exception as e:
         console.print(f"\n❌ **Validation error:** {e}", style="bold red")
+        # Debug stack trace to file logs for diagnostics
+        logger.debug("Error in validate command", exc_info=True)
         sys.exit(1)
+
+
+@cli.command()
+def version() -> None:
+    """Print the current lockstep-rebase version."""
+    console.print(f"lockstep-rebase {PACKAGE_VERSION}")
 
 
 def _display_rebase_plan(operation) -> None:
@@ -880,9 +930,13 @@ def main() -> None:
         cli()
     except KeyboardInterrupt:
         console.print("\n\n🚫 **Operation cancelled by user**", style="bold yellow")
+        # Debug stack trace for cancellation context
+        logger.debug("Top-level cancellation (KeyboardInterrupt)", exc_info=True)
         sys.exit(130)
     except Exception as e:
         console.print(f"\n💥 **Unexpected error:** {e}", style="bold red")
+        # Debug stack trace to file logs for diagnostics
+        logger.debug("Unexpected error in main()", exc_info=True)
         sys.exit(1)
 
 

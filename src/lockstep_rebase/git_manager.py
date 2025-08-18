@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 from git import Repo, InvalidGitRepositoryError
 from git.exc import GitCommandError
 
@@ -21,8 +21,36 @@ class GitManager:
 
     def __init__(self, repo_path: Optional[Path] = None) -> None:
         """Initialize Git manager with optional repository path."""
-        self.repo_path = repo_path or Path.cwd()
+        self.repo_path = (repo_path or Path.cwd()).resolve()
         self._repo: Optional[Repo] = None
+
+    # --- Path normalization helpers ---
+    def _to_repo_relative_str(self, p: Union[str, Path]) -> str:
+        """Return a POSIX-style path relative to repo root for any given path.
+
+        If `p` is absolute and inside the repository working directory, it is
+        converted to a relative path. If `p` is already relative, it is
+        normalized to POSIX separators. If `p` is outside the repo, the POSIX
+        string form is returned as-is.
+        """
+        try:
+            base = Path(self.repo.working_dir).resolve()
+        except Exception:
+            # If repo is not yet discovered, fall back to current repo_path
+            base = self.repo_path
+
+        pp = Path(p)
+        try:
+            if pp.is_absolute():
+                rel = pp.resolve().relative_to(base)
+                return rel.as_posix()
+            # Already relative: ensure POSIX separators
+            return pp.as_posix()
+        except Exception:
+            # Outside the repo or resolution failed: best-effort POSIX string
+            s = pp.as_posix()
+            logger.debug(f"Path '{s}' not under repo root '{base}'; passing as-is")
+            return s
 
     @property
     def repo(self) -> Repo:
@@ -241,23 +269,23 @@ class GitManager:
             logger.error(f"Error during rebase: {e}")
             raise GitRepositoryError(f"Error during rebase: {e}")
 
-    def _get_conflict_files(self) -> List[str]:
+    def _get_conflict_files(self) -> List[Path]:
         """Get list of files with merge conflicts."""
         try:
             output = self.repo.git.diff("--name-only", "--diff-filter=U")
-            return [f.strip() for f in output.split("\n") if f.strip()]
+            return [Path(self.repo.working_dir) / Path(f.strip()) for f in output.split("\n") if f.strip()]
         except Exception as e:
             logger.error(f"Error getting conflict files: {e}")
             return []
 
-    def get_conflict_files(self) -> List[str]:
+    def get_conflict_files(self) -> List[Path]:
         """Public wrapper to return unresolved merge paths (files and gitlinks)."""
         try:
             return self._get_conflict_files()
         except Exception:
             return []
 
-    def continue_rebase(self) -> Tuple[bool, List[str]]:
+    def continue_rebase(self) -> Tuple[bool, List[Path]]:
         """Continue a rebase after conflicts are resolved."""
         try:
             # Avoid interactive editor prompt
@@ -338,17 +366,19 @@ class GitManager:
             if not gitmodules_path.exists():
                 return False
             content = gitmodules_path.read_text(encoding="utf-8", errors="ignore")
-            return f"path = {filepath}" in content
+            rel = self._to_repo_relative_str(filepath)
+            return f"path = {rel}" in content
         except Exception:
             return False
 
-    def get_unmerged_index_entries(self, path: str) -> List[dict]:
+    def get_unmerged_index_entries(self, path: Path) -> List[dict]:
         """Return parsed entries from `git ls-files -u -- <path>` for an unmerged path.
 
         Each entry is a dict with keys: stage, hash, path
         """
         try:
-            output = self.repo.git.ls_files("-u", "--", path)
+            rel = self._to_repo_relative_str(path)
+            output = self.repo.git.ls_files("-u", "--", rel)
             if not output.strip():
                 return []
             entries: List[dict] = []
@@ -374,11 +404,11 @@ class GitManager:
             logger.error(f"Failed to checkout {commitish} in {self.repo.working_dir}: {e}")
             raise GitRepositoryError(f"Failed to checkout {commitish}: {e}")
 
-    def add_paths(self, paths: List[str]) -> None:
+    def add_paths(self, paths: List[Path]) -> None:
         """Stage the given paths in the specified repository path."""
         try:
             # Use porcelain 'git add -- <path>' for better handling of gitlinks (submodules)
-            str_paths = [str(p) for p in paths]
+            str_paths = [self._to_repo_relative_str(p) for p in paths]
             for p in str_paths:
                 # The '--' ensures pathspec is not interpreted as an option
                 self.repo.git.add("--", p)
@@ -441,28 +471,29 @@ class GitManager:
             return []
 
     def has_unstaged_changes(self) -> bool:
-        """Return True if there are unstaged changes in the working tree."""
+        """Return True if there are unstaged changes in the working tree.
+
+        Untracked files are ignored. This checks only working tree changes (not index).
+        """
         try:
-            # Only consider unstaged changes (ignore index and untracked files)
             return self.repo.is_dirty(index=False, working_tree=True, untracked_files=False)
         except Exception:
             return False
 
-    # --- Helpers for submodule auto-discovery ---
-    def get_submodule_pointer_at(self, branch: str, submodule_path: str) -> Optional[str]:
-        """Return the gitlink SHA for a submodule path at a given branch in the parent repo.
+    def get_submodule_pointer_at(self, branch: str, submodule_path: Union[str, Path]) -> Optional[str]:
+        """Return the gitlink commit SHA for a submodule path at a given branch/ref.
 
         Args:
-            branch: Parent repository branch or commit-ish
-            submodule_path: Path to the submodule relative to parent repo root
-            repo_path: Parent repository path (defaults to manager's repo)
+            branch: The ref/branch name or full ref to inspect in the parent repository.
+            submodule_path: The submodule path. Can be absolute Path, relative Path, or str.
 
         Returns:
-            The gitlink SHA (40-hex) if present, otherwise None.
+            The commit SHA string if the gitlink exists at that ref, otherwise None.
         """
         try:
-            # Use ls-tree to read the tree entry; gitlink mode is 160000 and type 'commit'
-            output = self.repo.git.ls_tree(branch, "--", submodule_path)
+            rel = self._to_repo_relative_str(submodule_path)
+            # Use porcelain ls-tree to read the tree entry for the given path at the ref
+            output = self.repo.git.ls_tree(branch, "--", rel)
             line = output.strip()
             if not line:
                 return None
@@ -472,11 +503,13 @@ class GitManager:
                 return parts[2]
             return None
         except Exception as e:
-            logger.error(f"Error reading submodule pointer at {branch}:{submodule_path}: {e}")
+            logger.error(
+                f"Error reading submodule pointer at {branch}:{submodule_path}: {e}"
+            )
             return None
 
     def submodule_changed_between(
-        self, base_branch: str, feature_branch: str, submodule_path: str
+        self, base_branch: str, feature_branch: str, submodule_path: Path
     ) -> bool:
         """Return True if the submodule entry changed between base..feature in the parent repo.
 
@@ -484,12 +517,13 @@ class GitManager:
         any commits that touched the gitlink entry.
         """
         try:
+            rel = self._to_repo_relative_str(submodule_path)
             output = self.repo.git.log(
                 "--pretty=format:",
                 "--name-only",
                 f"{base_branch}..{feature_branch}",
                 "--",
-                submodule_path,
+                rel,
             )
             touched = [ln.strip() for ln in output.splitlines() if ln.strip()]
             return len(touched) > 0
