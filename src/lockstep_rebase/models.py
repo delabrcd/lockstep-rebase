@@ -90,8 +90,15 @@ class RebaseOperation:
 
     def get_state_for_repo(self, repo_path: Path) -> Optional[RebaseState]:
         """Get rebase state for a specific repository."""
+        # Normalize path for cross-platform comparisons (Windows drive roots, etc.)
+        try:
+            normalized = repo_path.resolve()
+        except Exception:
+            # Fallback to as-is if resolution fails in unusual environments
+            normalized = repo_path
+
         for state in self.repo_states:
-            if state.repo.path == repo_path:
+            if state.repo.path == normalized:
                 return state
         return None
 
