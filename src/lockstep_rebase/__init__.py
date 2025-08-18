@@ -5,7 +5,7 @@ This package provides tools for rebasing Git repositories that contain multiple 
 of tightly coupled submodules, with automatic conflict resolution and commit tracking.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from .rebase_orchestrator import RebaseOrchestrator
 from .models import RebaseOperation, RebaseState, RepoInfo, CommitInfo
