@@ -138,7 +138,9 @@ def setup_logging(verbose: bool = False, console_level: Optional[str] = None, lo
     root.addHandler(run_file_handler)
 
     # Second handler -> stable aggregate file (provides an easy always-on path)
-    aggregate_handler = RotatingFileHandler(str(stable_aggregate_path), maxBytes=1_000_000, backupCount=3)
+    aggregate_handler = RotatingFileHandler(
+        str(stable_aggregate_path), maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+    )
     aggregate_handler.setLevel(logging.DEBUG)
     aggregate_handler.setFormatter(file_fmt)
     root.addHandler(aggregate_handler)

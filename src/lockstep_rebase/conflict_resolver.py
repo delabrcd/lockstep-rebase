@@ -117,21 +117,48 @@ class ConflictResolver:
             if not entries:
                 return False
 
-            # Find the incoming commit hash (stage 3)
-            incoming_hash = None
+            # Inspect both sides from the index for gitlink conflicts
+            ours_hash = None  # stage 2
+            theirs_hash = None  # stage 3
             for entry in entries:
-                if entry.get("stage") == "3":  # Theirs (incoming)
-                    incoming_hash = entry.get("hash")
-                    break
+                stg = entry.get("stage")
+                if stg == "2":
+                    ours_hash = entry.get("hash")
+                elif stg == "3":
+                    theirs_hash = entry.get("hash")
 
-            if not incoming_hash:
-                logger.warning(f"Could not find incoming hash for submodule {submodule.path}")
+            if not ours_hash and not theirs_hash:
+                logger.warning(
+                    f"Could not find stage 2/3 hashes for submodule {submodule.path} in unmerged index entries"
+                )
                 return False
 
-            # Try to resolve using commit mappings
-            resolved_hash = self._find_resolved_submodule_hash(incoming_hash)
-            if not resolved_hash:
-                logger.warning(f"Could not find resolved hash for {incoming_hash[:8]}")
+            # Preferred strategy:
+            # 1) Map stage-2 (ours/source pointer in parent) via global mappings (old -> new)
+            #    This is the typical case: we want the rebased equivalent of the source pointer.
+            # 2) Fallbacks:
+            #    - If mapping missing but stage-2 exists, use stage-2 as-is (it may already be the desired commit)
+            #    - If only stage-3 is present, attempt mapping it; if still missing, use stage-3 as last resort.
+            resolved_hash = None
+            mapped_from: str = ""
+            if ours_hash:
+                resolved_hash = self._find_resolved_submodule_hash(ours_hash)
+                mapped_from = "ours(stage-2)"
+            if not resolved_hash and ours_hash:
+                resolved_hash = ours_hash
+                mapped_from = "ours(stage-2, passthrough)"
+            if not resolved_hash and theirs_hash:
+                alt = self._find_resolved_submodule_hash(theirs_hash)
+                if alt:
+                    resolved_hash = alt
+                    mapped_from = "theirs(stage-3)"
+                else:
+                    resolved_hash = theirs_hash
+                    mapped_from = "theirs(stage-3, passthrough)"
+            if not resolved_hash and theirs_hash:
+                logger.warning(
+                    f"Could not determine resolved hash for submodule {submodule.path}: theirs={theirs_hash[:8] if theirs_hash else 'None'} ours={ours_hash[:8] if ours_hash else 'None'}"
+                )
                 return False
 
             gm_sub = submodule.git_manager
@@ -168,13 +195,14 @@ class ConflictResolver:
                 pass
 
             # Get commit messages for tracking from the submodule repo
-            # The incoming/resolved hashes belong to the submodule, not the parent
-            original_message = gm_sub.get_commit_subject(incoming_hash)
+            # The original/resolved hashes belong to the submodule, not the parent
+            original_hash = theirs_hash or ours_hash
+            original_message = gm_sub.get_commit_subject(original_hash)
             resolved_message = gm_sub.get_commit_subject(resolved_hash)
 
             # Track the resolution
             self._track_resolved_commit(
-                incoming_hash,
+                original_hash,
                 resolved_hash,
                 resolved_message or "<unknown>",
                 submodule.path,
@@ -186,7 +214,9 @@ class ConflictResolver:
                     f"{submodule.path}: Original message '{original_message}' != Resolved message '{resolved_message}'"
                 )
 
-            logger.info(f"Resolved submodule {submodule.path} to commit {resolved_hash[:8]}")
+            logger.info(
+                f"Resolved submodule {submodule.path} to commit {resolved_hash[:8]} (via {mapped_from})"
+            )
             return True
 
         except Exception as e:
@@ -296,8 +326,10 @@ class ConflictResolver:
             unresolved_files = self.git_manager.get_conflict_files()
 
             if unresolved_files:
+                # Convert Path objects to strings to avoid join type errors on Windows
+                unresolved_strs = [str(p) for p in unresolved_files]
                 return False, [
-                    f"❌ Still have unresolved conflicts in: {', '.join(unresolved_files)}"
+                    f"❌ Still have unresolved conflicts in: {', '.join(unresolved_strs)}"
                 ]
 
             # Check that changes are staged via attached GitManager
